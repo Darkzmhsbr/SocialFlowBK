@@ -57,6 +57,14 @@ async function exchangeCodeForShortLivedToken(code) {
       permissions: payload.permissions || [],
     };
   } catch (error) {
+    console.error('========== INSTAGRAM TOKEN EXCHANGE ERROR ==========');
+    console.error('HTTP STATUS:', error.response?.status);
+    console.error('META RESPONSE:', JSON.stringify(error.response?.data, null, 2));
+    console.error('ERROR MESSAGE:', error.message);
+    console.error('REQUEST URL:', igConfig.oauthTokenUrl);
+    console.error('REDIRECT URI SENT:', metaConfig.redirectUri);
+    console.error('CODE LENGTH:', code?.length, 'CODE TAIL:', code?.slice(-6));
+    console.error('====================================================');
     throw toAppError(error, 'Failed to exchange authorization code for token');
   }
 }
