@@ -30,7 +30,12 @@ function buildAuthorizationUrl(state) {
     scope: igConfig.scopes,
     state,
   });
-  return `${igConfig.oauthAuthorizeUrl}?${params.toString()}`;
+  const url = `${igConfig.oauthAuthorizeUrl}?${params.toString()}`;
+  console.log('========== INSTAGRAM AUTHORIZE URL ==========');
+  console.log('AUTHORIZE HOST:', igConfig.oauthAuthorizeUrl);
+  console.log('REDIRECT URI IN AUTHORIZE:', metaConfig.redirectUri);
+  console.log('=============================================');
+  return url;
 }
 
 async function exchangeCodeForShortLivedToken(code) {
