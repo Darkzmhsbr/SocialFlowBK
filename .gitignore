@@ -1,0 +1,20 @@
+# Env files
+.env
+.env.local
+.env.production
+.env.*.local
+
+# Dependencies
+node_modules/
+
+# Prisma generated client (regenerated via `npx prisma generate`)
+generated/
+
+# Logs
+*.log
+npm-debug.log*
+
+# Editor/OS
+.DS_Store
+.vscode/
+.idea/

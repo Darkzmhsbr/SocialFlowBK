@@ -1,0 +1,59 @@
+// SocialFlow - database schema
+// PostgreSQL, hosted on Railway.
+//
+// Only two models exist in this MVP: a minimal User (temporary, until real
+// auth is built) and InstagramAccount (the actual focus of this version).
+// The relation is already 1-to-many so multiple Instagram accounts per user
+// works without a future migration reshaping the schema.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String   @id @default(uuid())
+  email     String?  @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  instagramAccounts InstagramAccount[]
+
+  @@map("users")
+}
+
+enum InstagramAccountStatus {
+  ACTIVE
+  TOKEN_EXPIRED
+  REVOKED
+  ERROR
+}
+
+model InstagramAccount {
+  id     String @id @default(uuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  instagramUserId  String @unique // ID returned by Meta for the authorized IG account
+  username         String
+  name             String?
+  profilePictureUrl String?
+  accountType      String? // BUSINESS | MEDIA_CREATOR
+
+  // Never store a raw token. This column holds the ciphertext produced by
+  // src/utils/crypto.js (encryptToken). The key lives only in TOKEN_ENCRYPTION_KEY.
+  accessTokenEncrypted String
+  tokenExpiresAt       DateTime?
+
+  status     InstagramAccountStatus @default(ACTIVE)
+  createdAt  DateTime               @default(now())
+  updatedAt  DateTime               @updatedAt
+  lastSyncAt DateTime?
+
+  @@index([userId])
+  @@map("instagram_accounts")
+}
