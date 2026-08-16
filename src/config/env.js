@@ -92,6 +92,15 @@ const env = {
     pollTimeoutMs: Number(process.env.WORKER_POLL_TIMEOUT_MS) || 90 * 1000, // 90 s
     pollIntervalMs: Number(process.env.WORKER_POLL_INTERVAL_MS) || 3000, // 3 s
   },
+
+  // Phase 3.1 - authentication. jwtSecret should be a long random string;
+  // rotating it invalidates every issued token, which is fine during beta
+  // but requires a "everyone logs in again" migration later.
+  auth: {
+    jwtSecret: required('JWT_SECRET'),
+    jwtExpiresIn: process.env.JWT_EXPIRES_IN || '7d',
+    bcryptRounds: Number(process.env.BCRYPT_ROUNDS) || 10,
+  },
 };
 
 module.exports = env;

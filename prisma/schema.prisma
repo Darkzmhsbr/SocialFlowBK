@@ -11,6 +11,13 @@
 //   - ScheduledPost: the actual post (draft/scheduled/published/etc)
 //   - PostMedia:     pivot with `order` so carousels keep media sequence
 //     and the same MediaAsset can be reused across multiple posts
+//
+// Phase 3.1 additions (auth foundation):
+//   - User: gained passwordHash + name (both nullable so the temp-user-1
+//     seeded by Phase 1 still validates; Phase 3.3 tightens them once
+//     the default user is retired).
+//   - InviteCode: single-use, optionally expiring token used to gate
+//     registration during the closed beta.
 
 generator client {
   provider = "prisma-client-js"
@@ -27,9 +34,18 @@ model User {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  // Phase 3.1: auth fields. Both nullable so pre-auth rows (like temp-user-1
+  // created by /api/setup/default-user) don't fail schema validation.
+  passwordHash String?
+  name         String?
+
   instagramAccounts InstagramAccount[]
   mediaAssets       MediaAsset[]
   scheduledPosts    ScheduledPost[]
+
+  // Phase 3.1: invites
+  invitesCreated InviteCode[] @relation("InviteCreator")
+  inviteUsed     InviteCode?  @relation("InviteConsumer")
 
   @@map("users")
 }
@@ -160,4 +176,25 @@ model PostMedia {
   @@index([postId])
   @@index([mediaAssetId])
   @@map("post_media")
+}
+
+// --- Phase 3.1: invite-only registration -------------------------------
+
+// Single-use registration token. During the closed beta, /api/auth/register
+// only succeeds if the caller presents a valid, unused, unexpired code.
+// After beta this table stays useful for referral flows or admin resets.
+model InviteCode {
+  id          String    @id @default(uuid())
+  code        String    @unique
+  createdById String?
+  createdBy   User?     @relation("InviteCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  usedById    String?   @unique
+  usedBy      User?     @relation("InviteConsumer", fields: [usedById], references: [id], onDelete: SetNull)
+  usedAt      DateTime?
+  expiresAt   DateTime?
+  note        String?   // optional label, e.g. "convite João" for tracking
+  createdAt   DateTime  @default(now())
+
+  @@index([createdById])
+  @@map("invite_codes")
 }
