@@ -5,7 +5,7 @@
 //
 // Flow implemented (per Meta's official "Instagram API with Instagram Login"
 // / Business Login docs, verified Aug 2026):
-//   1. Build authorization URL          -> api.instagram.com/oauth/authorize
+//   1. Build authorization URL          -> www.instagram.com/oauth/authorize
 //   2. Exchange code for short-lived token -> api.instagram.com/oauth/access_token
 //   3. Exchange short-lived for long-lived -> graph.instagram.com/access_token
 //   4. Refresh a long-lived token        -> graph.instagram.com/refresh_access_token
@@ -14,6 +14,13 @@
 // Data-plane calls use graph.instagram.com (Instagram Login flow host).
 // The old graph.facebook.com host belongs to the separate "Facebook Login
 // for Business" flow and is intentionally not used here.
+//
+// IMPORTANT: the token exchange endpoint REQUIRES multipart/form-data (as
+// shown in Meta's own curl -F example). Sending application/x-www-form-urlencoded
+// makes the endpoint return a misleading "Error validating verification code.
+// Please make sure your redirect_uri is identical..." even when the redirect_uri
+// is byte-for-byte correct. Use FormData and let axios set the Content-Type
+// with the proper multipart boundary.
 
 const axios = require('axios');
 const env = require('../../config/env');
@@ -40,16 +47,21 @@ function buildAuthorizationUrl(state) {
 
 async function exchangeCodeForShortLivedToken(code) {
   try {
-    const form = new URLSearchParams({
-      client_id: metaConfig.appId,
-      client_secret: metaConfig.appSecret,
-      grant_type: 'authorization_code',
-      redirect_uri: metaConfig.redirectUri,
-      code,
-    });
+    // Meta's token endpoint expects multipart/form-data, NOT
+    // application/x-www-form-urlencoded. See the comment at the top of this
+    // file for the (poorly documented) reason.
+    const form = new FormData();
+    form.append('client_id', metaConfig.appId);
+    form.append('client_secret', metaConfig.appSecret);
+    form.append('grant_type', 'authorization_code');
+    form.append('redirect_uri', metaConfig.redirectUri);
+    form.append('code', code);
 
     const { data } = await axios.post(igConfig.oauthTokenUrl, form, {
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      // No Content-Type header on purpose: axios sets it to
+      // "multipart/form-data; boundary=..." automatically when the body is a
+      // FormData instance. Setting it manually here would strip the boundary
+      // and break the request.
       timeout: 10000,
     });
 
