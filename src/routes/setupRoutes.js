@@ -44,7 +44,6 @@ router.get('/default-user', async (req, res) => {
       create: {
         id: userId,
         email: `default+${String(userId).slice(0, 8)}@zenyxvips.com`,
-        name: 'Default User',
       },
     });
 
@@ -56,7 +55,6 @@ router.get('/default-user', async (req, res) => {
         user: {
           id: user.id,
           email: user.email ?? null,
-          name: user.name ?? null,
           createdAt: user.createdAt ?? null,
         },
         message: 'User default garantido no banco. Pode conectar Instagram agora.',
