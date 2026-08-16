@@ -133,4 +133,124 @@ router.get('/generate-initial-invite', async (req, res) => {
   }
 });
 
+// POST /api/setup/promote-default-user?token=SEU_TOKEN
+// Body: { targetUserId: "uuid-do-seu-user-real" }
+//
+// One-shot migration: moves every InstagramAccount, ScheduledPost and
+// MediaAsset owned by DEFAULT_USER_ID over to a real registered user,
+// then deletes the placeholder. Idempotent - running again after success
+// returns "nothing to migrate" because DEFAULT_USER_ID is gone.
+//
+// Safe to run: the entire migration happens inside a Prisma transaction,
+// so any failure rolls back to a consistent state. Nothing is deleted
+// until every reassignment succeeded.
+router.post('/promote-default-user', async (req, res) => {
+  if (!assertSetupToken(req, res)) return;
+
+  const sourceUserId = process.env.DEFAULT_USER_ID;
+  const targetUserId = req.body?.targetUserId || req.query.targetUserId;
+
+  if (!sourceUserId) {
+    return res.status(500).json({
+      success: false,
+      error: { code: 'CONFIG_ERROR', message: 'DEFAULT_USER_ID não configurado.' },
+    });
+  }
+  if (!targetUserId) {
+    return res.status(400).json({
+      success: false,
+      error: { code: 'VALIDATION_ERROR', message: 'targetUserId é obrigatório no body ou query.' },
+    });
+  }
+  if (targetUserId === sourceUserId) {
+    return res.status(400).json({
+      success: false,
+      error: {
+        code: 'VALIDATION_ERROR',
+        message: 'targetUserId não pode ser igual ao DEFAULT_USER_ID.',
+      },
+    });
+  }
+
+  try {
+    // Fast path: source doesn't exist -> nothing to do. Keeps the endpoint
+    // idempotent so accidental re-runs don't error out.
+    const source = await prisma.user.findUnique({ where: { id: sourceUserId } });
+    if (!source) {
+      return res.json({
+        success: true,
+        data: {
+          migrated: {
+            instagramAccounts: 0,
+            scheduledPosts: 0,
+            mediaAssets: 0,
+          },
+          message: 'Nada a migrar. DEFAULT_USER_ID já não existe no banco.',
+        },
+      });
+    }
+
+    const target = await prisma.user.findUnique({ where: { id: targetUserId } });
+    if (!target) {
+      return res.status(404).json({
+        success: false,
+        error: { code: 'NOT_FOUND', message: `Usuário destino ${targetUserId} não encontrado.` },
+      });
+    }
+
+    const result = await prisma.$transaction(async (tx) => {
+      const igCount = await tx.instagramAccount.updateMany({
+        where: { userId: sourceUserId },
+        data: { userId: targetUserId },
+      });
+      const postsCount = await tx.scheduledPost.updateMany({
+        where: { userId: sourceUserId },
+        data: { userId: targetUserId },
+      });
+      const mediaCount = await tx.mediaAsset.updateMany({
+        where: { userId: sourceUserId },
+        data: { userId: targetUserId },
+      });
+
+      // Every FK now points to the target user. Safe to remove the placeholder.
+      await tx.user.delete({ where: { id: sourceUserId } });
+
+      return {
+        instagramAccounts: igCount.count,
+        scheduledPosts: postsCount.count,
+        mediaAssets: mediaCount.count,
+      };
+    });
+
+    logger.info('Default user promoted', {
+      from: sourceUserId,
+      to: targetUserId,
+      migrated: result,
+    });
+
+    return res.json({
+      success: true,
+      data: {
+        migrated: result,
+        message:
+          'Migração concluída. Recarregue o dashboard - os dados agora pertencem à sua conta real.',
+      },
+    });
+  } catch (error) {
+    logger.error('Failed to promote default user', {
+      message: error.message,
+      code: error.code,
+      meta: error.meta,
+    });
+    return res.status(500).json({
+      success: false,
+      error: {
+        code: error.code || 'PRISMA_ERROR',
+        message: error.message,
+        details: error.meta || null,
+      },
+    });
+  }
+});
+
 module.exports = router;

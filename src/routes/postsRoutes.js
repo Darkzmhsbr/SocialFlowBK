@@ -1,8 +1,11 @@
 const { Router } = require('express');
 const asyncHandler = require('../middleware/asyncHandler');
+const requireAuth = require('../middleware/requireAuth');
 const controller = require('../controllers/postsController');
 
 const router = Router();
+
+router.use(requireAuth);
 
 router.post('/', asyncHandler(controller.createPost));
 router.get('/', asyncHandler(controller.listPosts));
