@@ -10,6 +10,9 @@
 //   3. Exchange short-lived for long-lived -> graph.instagram.com/access_token
 //   4. Refresh a long-lived token        -> graph.instagram.com/refresh_access_token
 //   5. Fetch the authorized account's profile -> graph.instagram.com/me
+//   6. Create media container            -> graph.instagram.com/{version}/{ig-user-id}/media
+//   7. Poll container status             -> graph.instagram.com/{version}/{creation-id}?fields=status_code
+//   8. Publish the container             -> graph.instagram.com/{version}/{ig-user-id}/media_publish
 //
 // Data-plane calls use graph.instagram.com (Instagram Login flow host).
 // The old graph.facebook.com host belongs to the separate "Facebook Login
@@ -28,6 +31,15 @@ const { AppError, ErrorCodes } = require('../../utils/errors');
 const logger = require('../../utils/logger');
 
 const { instagram: igConfig, meta: metaConfig } = env;
+
+// Publishing / container endpoints require a versioned base. The older
+// OAuth / profile calls have worked without a version so we don't touch
+// them, but every new publish endpoint below goes through apiBase().
+function apiBase() {
+  return igConfig.apiVersion
+    ? `${igConfig.apiBaseUrl}/${igConfig.apiVersion}`
+    : igConfig.apiBaseUrl;
+}
 
 function buildAuthorizationUrl(state) {
   const params = new URLSearchParams({
@@ -80,6 +92,8 @@ async function exchangeCodeForShortLivedToken(code) {
     console.error('ERROR MESSAGE:', error.message);
     console.error('REQUEST URL:', igConfig.oauthTokenUrl);
     console.error('REDIRECT URI SENT:', metaConfig.redirectUri);
+    console.error('CLIENT ID SENT:', metaConfig.appId);
+    console.error('CLIENT SECRET LENGTH:', metaConfig.appSecret?.length);
     console.error('CODE LENGTH:', code?.length, 'CODE TAIL:', code?.slice(-6));
     console.error('====================================================');
     throw toAppError(error, 'Failed to exchange authorization code for token');
@@ -141,6 +155,109 @@ async function fetchAuthorizedProfile(accessToken) {
   }
 }
 
+// --- Phase 2.2a: Content Publishing --------------------------------------
+
+/**
+ * Create a media container. This is step 1 of Instagram's publish flow.
+ * The container is just a "recipe" that references the media URL; it isn't
+ * live on the profile yet. Returns the creation id used to poll status
+ * and, eventually, to publish.
+ *
+ * @param {string} igUserId     - InstagramAccount.instagramUserId
+ * @param {object} params       - { image_url?, video_url?, caption?, media_type?, is_carousel_item?, children? }
+ * @param {string} accessToken  - decrypted long-lived token for the account
+ * @returns {Promise<{ creationId: string }>}
+ */
+async function createMediaContainer(igUserId, params, accessToken) {
+  try {
+    const { data } = await axios.post(
+      `${apiBase()}/${igUserId}/media`,
+      null,
+      {
+        params: { ...params, access_token: accessToken },
+        timeout: 30000,
+      }
+    );
+
+    if (!data?.id) {
+      throw new AppError(
+        ErrorCodes.INSTAGRAM_MEDIA_ERROR,
+        'Instagram não retornou id de container.',
+        502,
+        { response: data }
+      );
+    }
+
+    return { creationId: String(data.id) };
+  } catch (error) {
+    if (error instanceof AppError) throw error;
+    throw toAppError(error, 'Failed to create Instagram media container');
+  }
+}
+
+/**
+ * Poll a container's status. Instagram processes uploads async; images are
+ * usually FINISHED within a second, videos can take a while. Callers wrap
+ * this in a poll loop with a timeout (see instagramMediaService).
+ *
+ * Possible status codes:
+ *   - IN_PROGRESS  : still processing (keep polling)
+ *   - FINISHED     : ready to publish
+ *   - ERROR        : Meta rejected the media (aspect ratio, format, ...)
+ *   - EXPIRED      : the container aged out and can no longer be published
+ *   - PUBLISHED    : already published (should not normally see this)
+ */
+async function getMediaContainerStatus(creationId, accessToken) {
+  try {
+    const { data } = await axios.get(`${apiBase()}/${creationId}`, {
+      params: {
+        fields: 'status_code,status',
+        access_token: accessToken,
+      },
+      timeout: 15000,
+    });
+
+    return {
+      statusCode: data.status_code,
+      statusMessage: data.status || null,
+    };
+  } catch (error) {
+    throw toAppError(error, 'Failed to fetch Instagram media container status');
+  }
+}
+
+/**
+ * Publish a container that finished processing. On success Instagram
+ * returns the id of the actual live post, which we store as
+ * ScheduledPost.instagramMediaId for later analytics fetching.
+ */
+async function publishMediaContainer(igUserId, creationId, accessToken) {
+  try {
+    const { data } = await axios.post(
+      `${apiBase()}/${igUserId}/media_publish`,
+      null,
+      {
+        params: { creation_id: creationId, access_token: accessToken },
+        timeout: 30000,
+      }
+    );
+
+    if (!data?.id) {
+      throw new AppError(
+        ErrorCodes.INSTAGRAM_PUBLISH_FAILED,
+        'Instagram não retornou id do post publicado.',
+        502,
+        { response: data }
+      );
+    }
+
+    return { mediaId: String(data.id) };
+  } catch (error) {
+    if (error instanceof AppError) throw error;
+    throw toAppError(error, 'Failed to publish Instagram media container');
+  }
+}
+
 function toAppError(error, contextMessage) {
   const metaError = error.response?.data?.error;
 
@@ -173,4 +290,7 @@ module.exports = {
   exchangeForLongLivedToken,
   refreshLongLivedToken,
   fetchAuthorizedProfile,
+  createMediaContainer,
+  getMediaContainerStatus,
+  publishMediaContainer,
 };

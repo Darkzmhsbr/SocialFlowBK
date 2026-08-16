@@ -17,6 +17,10 @@ const POST_INCLUDE = {
       name: true,
       profilePictureUrl: true,
       accountType: true,
+      instagramUserId: true,
+      accessTokenEncrypted: true,
+      tokenExpiresAt: true,
+      status: true,
     },
   },
 };
@@ -120,6 +124,111 @@ function deleteById(id) {
   return prisma.scheduledPost.delete({ where: { id } });
 }
 
+// --- Phase 2.2a: worker helpers ------------------------------------------
+
+/**
+ * Atomically claim up to `limit` posts that are due for publishing.
+ *
+ * Uses Postgres's SELECT ... FOR UPDATE SKIP LOCKED so if two workers run
+ * at the same time (or a Railway restart overlaps with the previous
+ * process), they never pick the same row. Each claimed row is flipped from
+ * SCHEDULED to QUEUED in the same transaction, so it disappears from the
+ * "due" query as soon as we own it.
+ *
+ * Returns the full post objects (with medias + account) ready to publish.
+ */
+async function claimDuePosts(limit = 5) {
+  return prisma.$transaction(async (tx) => {
+    // The RETURNING clause of an UPDATE ... WHERE id IN (SELECT ... FOR UPDATE
+    // SKIP LOCKED) is the idiomatic way to claim a batch on Postgres.
+    const claimed = await tx.$queryRaw`
+      UPDATE "scheduled_posts"
+      SET "status" = 'QUEUED', "updatedAt" = NOW()
+      WHERE "id" IN (
+        SELECT "id" FROM "scheduled_posts"
+        WHERE "status" = 'SCHEDULED'
+          AND "scheduledFor" <= NOW()
+        ORDER BY "scheduledFor" ASC
+        LIMIT ${limit}
+        FOR UPDATE SKIP LOCKED
+      )
+      RETURNING "id"
+    `;
+
+    const ids = claimed.map((row) => row.id);
+    if (ids.length === 0) return [];
+
+    return tx.scheduledPost.findMany({
+      where: { id: { in: ids } },
+      include: POST_INCLUDE,
+    });
+  });
+}
+
+/**
+ * Called by the worker mid-publish (right before hitting Meta's publish
+ * endpoint) so the UI can show "Publicando..." while it's happening.
+ */
+function markPublishing(id) {
+  return prisma.scheduledPost.update({
+    where: { id },
+    data: { status: 'PUBLISHING' },
+    include: POST_INCLUDE,
+  });
+}
+
+/**
+ * Final state on success: store the Instagram media id (used later by
+ * analytics) and stamp publishedAt. Also clears failureReason in case this
+ * was a retry succeeding after a previous failure.
+ */
+function markPublished(id, instagramMediaId) {
+  return prisma.scheduledPost.update({
+    where: { id },
+    data: {
+      status: 'PUBLISHED',
+      publishedAt: new Date(),
+      instagramMediaId,
+      failureReason: null,
+    },
+    include: POST_INCLUDE,
+  });
+}
+
+/**
+ * Terminal failure: no more retries will happen. Frontend surfaces the
+ * failureReason so the user can decide whether to fix and reschedule.
+ */
+function markFailed(id, failureReason) {
+  return prisma.scheduledPost.update({
+    where: { id },
+    data: {
+      status: 'FAILED',
+      failureReason: (failureReason || '').slice(0, 500),
+    },
+    include: POST_INCLUDE,
+  });
+}
+
+/**
+ * Transient failure: keep the post in play. Push scheduledFor forward by
+ * `delayMs` and put status back to SCHEDULED so the next worker tick picks
+ * it up. Increments retryCount so we eventually stop retrying.
+ */
+function rescheduleForRetry(id, delayMs, failureReason) {
+  const nextAttemptAt = new Date(Date.now() + delayMs);
+  return prisma.scheduledPost.update({
+    where: { id },
+    data: {
+      status: 'SCHEDULED',
+      scheduledFor: nextAttemptAt,
+      retryCount: { increment: 1 },
+      failureReason: (failureReason || '').slice(0, 500),
+    },
+    include: POST_INCLUDE,
+  });
+}
+
 module.exports = {
   create,
   findById,
@@ -127,4 +236,9 @@ module.exports = {
   updateEditable,
   updateStatus,
   deleteById,
+  claimDuePosts,
+  markPublishing,
+  markPublished,
+  markFailed,
+  rescheduleForRetry,
 };

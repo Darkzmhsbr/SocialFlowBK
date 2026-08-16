@@ -13,6 +13,12 @@ function required(name, { onlyInProduction = false } = {}) {
   return value;
 }
 
+function bool(name, defaultValue) {
+  const raw = process.env[name];
+  if (raw === undefined || raw === '') return defaultValue;
+  return raw === '1' || raw.toLowerCase() === 'true';
+}
+
 const env = {
   port: process.env.PORT || 3000,
   nodeEnv: process.env.NODE_ENV || 'development',
@@ -66,6 +72,26 @@ const env = {
 
   // Temporary until real authentication exists (see README > Roadmap).
   defaultUserId: process.env.DEFAULT_USER_ID || 'temp-user-1',
+
+  // Phase 2.2a - publish worker settings. The worker runs inside the same
+  // Node process as the API (no separate service on Railway). WORKER_ENABLED
+  // lets you turn it off in local dev to test manually.
+  worker: {
+    enabled: bool('WORKER_ENABLED', true),
+    // How often the cron ticks. Set to 30s so a "publish at 10:00:00" post
+    // goes out between 10:00:00 and 10:00:30 in the worst case.
+    intervalSeconds: Number(process.env.WORKER_INTERVAL_SECONDS) || 30,
+    // How many posts each tick tries to publish. Keep small so a slow batch
+    // doesn't block the next tick for too long.
+    batchSize: Number(process.env.WORKER_BATCH_SIZE) || 5,
+    // How many times a single post retries on transient errors before giving
+    // up and being marked FAILED.
+    maxRetries: Number(process.env.WORKER_MAX_RETRIES) || 3,
+    // Instagram video containers can take a while to process. Poll with a
+    // hard cap so a stuck job doesn't hold a worker slot forever.
+    pollTimeoutMs: Number(process.env.WORKER_POLL_TIMEOUT_MS) || 90 * 1000, // 90 s
+    pollIntervalMs: Number(process.env.WORKER_POLL_INTERVAL_MS) || 3000, // 3 s
+  },
 };
 
 module.exports = env;
