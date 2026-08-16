@@ -3,6 +3,7 @@ const authService = require('../services/instagram/instagramAuthService');
 const accountService = require('../services/instagram/instagramAccountService');
 const { ok, fail } = require('../utils/apiResponse');
 const { AppError, ErrorCodes } = require('../utils/errors');
+const logger = require('../utils/logger');
 
 // GET /api/instagram/authorize-url  (requires auth)
 // Returns { url } for the frontend to redirect to. Replaces the old
@@ -17,12 +18,19 @@ const getAuthorizeUrl = async (req, res) => {
 // GET /api/instagram/callback?code=...&state=...
 // Public route (Meta calls it with no Authorization header). The user is
 // recovered from the pending state map keyed by the `state` we generated.
+// Registered as META_REDIRECT_URI in Meta App Dashboard.
 const handleCallback = async (req, res) => {
-  const { code, state, error, error_description } = req.query;
+  const { code, state, error, error_reason: errorReason, error_description: errorDescription } = req.query;
 
   if (error) {
     // User denied on Meta's screen. Bounce them back with a query param
     // the dashboard already knows how to render.
+    logger.warn('Instagram OAuth denied or cancelled', {
+      error,
+      errorReason,
+      errorDescription,
+      requestId: req.requestId,
+    });
     return res.redirect(`${env.frontendUrl}/dashboard?instagram=denied`);
   }
 
@@ -32,6 +40,8 @@ const handleCallback = async (req, res) => {
       throw new AppError(ErrorCodes.INVALID_CODE, 'Código de autorização ausente.', 400);
     }
 
+    logger.info('Instagram OAuth callback received', { requestId: req.requestId });
+
     const { accessToken, tokenExpiresAt } = await authService.completeOAuthFlow(code);
     await accountService.connectAndStoreAccount({ userId, accessToken, tokenExpiresAt });
 
@@ -40,8 +50,10 @@ const handleCallback = async (req, res) => {
     // Instead of returning a JSON error (Meta redirected the browser here,
     // so the user is watching), send them back to the dashboard with an
     // error marker. Full details are logged server-side.
-    // eslint-disable-next-line no-console
-    console.error('[instagram/callback] failed', err);
+    logger.error('Instagram token exchange failed', {
+      requestId: req.requestId,
+      message: err.message,
+    });
     return res.redirect(`${env.frontendUrl}/dashboard?instagram=error`);
   }
 };
@@ -50,6 +62,12 @@ const handleCallback = async (req, res) => {
 const listAccounts = async (req, res) => {
   const accounts = await accountService.listAccounts(req.userId);
   return ok(res, { accounts: accounts.map(accountService.toPublicShape) });
+};
+
+// GET /api/instagram/accounts/:id  (requires auth)
+const getAccount = async (req, res) => {
+  const account = await accountService.getAccount(req.params.id);
+  return ok(res, { account: accountService.toPublicShape(account) });
 };
 
 // DELETE /api/instagram/accounts/:id  (requires auth)
@@ -65,5 +83,6 @@ module.exports = {
   getAuthorizeUrl,
   handleCallback,
   listAccounts,
+  getAccount,
   disconnectAccount,
 };
