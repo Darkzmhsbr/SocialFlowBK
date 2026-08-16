@@ -5,6 +5,12 @@
 // auth is built) and InstagramAccount (the actual focus of this version).
 // The relation is already 1-to-many so multiple Instagram accounts per user
 // works without a future migration reshaping the schema.
+//
+// Phase 2.1 additions (post scheduling foundation):
+//   - MediaAsset:    each uploaded image/video, backed by Cloudinary
+//   - ScheduledPost: the actual post (draft/scheduled/published/etc)
+//   - PostMedia:     pivot with `order` so carousels keep media sequence
+//     and the same MediaAsset can be reused across multiple posts
 
 generator client {
   provider = "prisma-client-js"
@@ -22,6 +28,8 @@ model User {
   updatedAt DateTime @updatedAt
 
   instagramAccounts InstagramAccount[]
+  mediaAssets       MediaAsset[]
+  scheduledPosts    ScheduledPost[]
 
   @@map("users")
 }
@@ -54,6 +62,102 @@ model InstagramAccount {
   updatedAt  DateTime               @updatedAt
   lastSyncAt DateTime?
 
+  scheduledPosts ScheduledPost[]
+
   @@index([userId])
   @@map("instagram_accounts")
+}
+
+// --- Phase 2.1: media + scheduled posts --------------------------------
+
+enum MediaType {
+  IMAGE
+  VIDEO
+}
+
+// A single uploaded asset stored on Cloudinary. Never stores the file bytes -
+// only metadata + the public HTTPS URL that Instagram will fetch at publish time.
+model MediaAsset {
+  id                 String    @id @default(uuid())
+  userId             String
+  user               User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  type               MediaType
+  cloudinaryPublicId String    @unique // used to delete/manage the asset on Cloudinary
+  url                String              // HTTPS delivery URL (what Instagram fetches)
+  format             String              // "jpg", "png", "mp4", "mov"
+  bytes              Int
+  width              Int?
+  height             Int?
+  durationSec        Float?              // only set for VIDEO
+
+  createdAt          DateTime  @default(now())
+
+  postMedias         PostMedia[]
+
+  @@index([userId])
+  @@map("media_assets")
+}
+
+enum ScheduledPostType {
+  FEED_IMAGE      // 1 image on the feed
+  FEED_VIDEO      // 1 video on the feed
+  FEED_CAROUSEL   // 2-10 images/videos on the feed
+  REEL            // 1 vertical video posted as Reel
+  STORY           // 1 image/video story
+}
+
+enum ScheduledPostStatus {
+  DRAFT       // user is still composing; not scheduled yet
+  SCHEDULED   // has scheduledFor in the future; waiting for the worker
+  QUEUED      // worker picked it up; about to hit Instagram
+  PUBLISHING  // Instagram media container created; polling for readiness
+  PUBLISHED   // publish succeeded; instagramMediaId is set
+  FAILED      // publish failed; failureReason is set
+  ARCHIVED    // user archived it manually
+}
+
+model ScheduledPost {
+  id                 String              @id @default(uuid())
+  userId             String
+  user               User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  instagramAccountId String
+  instagramAccount   InstagramAccount    @relation(fields: [instagramAccountId], references: [id], onDelete: Cascade)
+
+  type               ScheduledPostType
+  caption            String?             @db.Text
+  status             ScheduledPostStatus @default(DRAFT)
+  scheduledFor       DateTime?
+  publishedAt        DateTime?
+  instagramMediaId   String?             // id Meta returns after /media_publish
+  failureReason      String?             @db.Text
+  retryCount         Int                 @default(0)
+
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
+
+  medias             PostMedia[]
+
+  // Composite index used by the worker (Phase 2.2):
+  //   WHERE status = 'SCHEDULED' AND scheduledFor <= NOW()
+  @@index([userId])
+  @@index([instagramAccountId])
+  @@index([status, scheduledFor])
+  @@map("scheduled_posts")
+}
+
+// Pivot between ScheduledPost and MediaAsset. `order` matters for carousels.
+model PostMedia {
+  id           String        @id @default(uuid())
+  postId       String
+  mediaAssetId String
+  order        Int
+
+  post         ScheduledPost @relation(fields: [postId], references: [id], onDelete: Cascade)
+  mediaAsset   MediaAsset    @relation(fields: [mediaAssetId], references: [id], onDelete: Restrict)
+
+  @@unique([postId, order])
+  @@index([postId])
+  @@index([mediaAssetId])
+  @@map("post_media")
 }
