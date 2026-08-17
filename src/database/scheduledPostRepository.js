@@ -5,11 +5,15 @@
 const prisma = require('../config/database');
 
 // Always attached to reads so callers get { medias: [{ order, mediaAsset }] }.
+// Rodada 2b: also includes coverMediaAsset (optional custom cover art for
+// videos/reels) so the publish service can pull cover.url without a
+// second query.
 const POST_INCLUDE = {
   medias: {
     include: { mediaAsset: true },
     orderBy: { order: 'asc' },
   },
+  coverMediaAsset: true,
   instagramAccount: {
     select: {
       id: true,
@@ -34,6 +38,7 @@ const POST_INCLUDE = {
  * @param {'DRAFT'|'SCHEDULED'} data.status
  * @param {Date|null} data.scheduledFor
  * @param {Array<{ mediaAssetId: string, order: number }>} data.medias
+ * @param {string|null} [data.coverMediaAssetId] - optional cover for VIDEO/REEL
  */
 function create(data) {
   return prisma.scheduledPost.create({
@@ -44,6 +49,7 @@ function create(data) {
       caption: data.caption,
       status: data.status,
       scheduledFor: data.scheduledFor,
+      coverMediaAssetId: data.coverMediaAssetId ?? null,
       medias: {
         create: data.medias.map((m) => ({
           order: m.order,
@@ -83,9 +89,14 @@ function findAllByUserId(userId, { status, take = 50, skip = 0 } = {}) {
  * Updates fields the user may edit while a post is still editable. Media
  * replacement (if provided) wipes all existing PostMedia rows and recreates
  * them - safer than diffing when the whole set changes.
+ *
+ * Rodada 2b: coverMediaAssetId in `patch` follows the standard three-state
+ * convention. undefined = don't touch. null = clear cover. string = set/replace.
+ * The service layer validates the string case (ownership, IMAGE type,
+ * type-allows-cover) before we get here.
  */
 function updateEditable(id, patch) {
-  const { caption, scheduledFor, status, type, medias } = patch;
+  const { caption, scheduledFor, status, type, medias, coverMediaAssetId } = patch;
 
   return prisma.$transaction(async (tx) => {
     if (medias) {
@@ -106,6 +117,7 @@ function updateEditable(id, patch) {
         ...(scheduledFor !== undefined ? { scheduledFor } : {}),
         ...(status !== undefined ? { status } : {}),
         ...(type !== undefined ? { type } : {}),
+        ...(coverMediaAssetId !== undefined ? { coverMediaAssetId } : {}),
       },
       include: POST_INCLUDE,
     });

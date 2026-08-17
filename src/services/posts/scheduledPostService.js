@@ -15,12 +15,17 @@ const logger = require('../../utils/logger');
 
 // Which post types accept how many media items, and which media types
 // are valid for each. Enforced on both create and update.
+//
+// Rodada 2b: `allowsCover` marks the types that accept a custom cover
+// image via cover_url. Meta accepts cover_url only for FEED_VIDEO and REEL
+// containers — carousels and stories ignore it, images don't have the
+// concept.
 const POST_TYPE_RULES = {
-  FEED_IMAGE:    { min: 1, max: 1,  allowed: ['IMAGE'] },
-  FEED_VIDEO:    { min: 1, max: 1,  allowed: ['VIDEO'] },
-  FEED_CAROUSEL: { min: 2, max: 10, allowed: ['IMAGE', 'VIDEO'] },
-  REEL:          { min: 1, max: 1,  allowed: ['VIDEO'] },
-  STORY:         { min: 1, max: 1,  allowed: ['IMAGE', 'VIDEO'] },
+  FEED_IMAGE:    { min: 1, max: 1,  allowed: ['IMAGE'],           allowsCover: false },
+  FEED_VIDEO:    { min: 1, max: 1,  allowed: ['VIDEO'],           allowsCover: true  },
+  FEED_CAROUSEL: { min: 2, max: 10, allowed: ['IMAGE', 'VIDEO'],  allowsCover: false },
+  REEL:          { min: 1, max: 1,  allowed: ['VIDEO'],           allowsCover: true  },
+  STORY:         { min: 1, max: 1,  allowed: ['IMAGE', 'VIDEO'],  allowsCover: false },
 };
 
 const VALID_TYPES = Object.keys(POST_TYPE_RULES);
@@ -44,9 +49,10 @@ const UNDELETABLE_STATUSES = new Set(['QUEUED', 'PUBLISHING']);
  * @param {string} [args.caption]
  * @param {Array<string>} args.mediaIds - ordered list of MediaAsset ids
  * @param {string|Date} [args.scheduledFor] - ISO string or Date; omit for DRAFT
+ * @param {string|null} [args.coverMediaAssetId] - optional cover for VIDEO/REEL
  * @returns {Promise<ScheduledPost>}
  */
-async function createPost({ userId, instagramAccountId, type, caption, mediaIds, scheduledFor }) {
+async function createPost({ userId, instagramAccountId, type, caption, mediaIds, scheduledFor, coverMediaAssetId }) {
   assertValidType(type);
   await assertAccountBelongsToUser({ instagramAccountId, userId });
 
@@ -54,6 +60,12 @@ async function createPost({ userId, instagramAccountId, type, caption, mediaIds,
     userId,
     type,
     mediaIds,
+  });
+
+  const resolvedCoverId = await resolveAndValidateCover({
+    userId,
+    type,
+    coverMediaAssetId,
   });
 
   const scheduleDate = normalizeScheduledFor(scheduledFor);
@@ -67,6 +79,7 @@ async function createPost({ userId, instagramAccountId, type, caption, mediaIds,
     status,
     scheduledFor: scheduleDate,
     medias: orderedMedias,
+    coverMediaAssetId: resolvedCoverId,
   });
 
   logger.info('Scheduled post created', {
@@ -75,6 +88,7 @@ async function createPost({ userId, instagramAccountId, type, caption, mediaIds,
     status: post.status,
     type: post.type,
     mediaCount: orderedMedias.length,
+    hasCover: Boolean(resolvedCoverId),
     scheduledFor: post.scheduledFor,
   });
 
@@ -104,6 +118,14 @@ async function getPost(id, userId) {
  * Update fields on a post that is still editable. Media replacement is
  * all-or-nothing: if `mediaIds` is provided, the entire ordered list is
  * replaced (this matches how carousel editors typically work).
+ *
+ * Rodada 2b: coverMediaAssetId follows the standard three-state convention:
+ *   - undefined: don't touch the current cover
+ *   - null:      clear the cover (Meta will pick a frame at publish time)
+ *   - string:    validate and set/replace
+ * The `type` may change in the same patch — cover validation always uses
+ * the post-patch type, so switching REEL -> FEED_IMAGE with a cover set
+ * fails cleanly instead of silently keeping a now-invalid cover.
  */
 async function updatePost(id, userId, patch) {
   const post = await getPost(id, userId);
@@ -138,6 +160,25 @@ async function updatePost(id, userId, patch) {
       type: nextType,
       mediaIds: currentMediaIds,
     });
+  }
+
+  // Cover handling. If the user is switching to a type that doesn't allow
+  // cover and they didn't explicitly touch cover in the patch, we auto-clear
+  // — anything else would leave a coverMediaAssetId on a type where it's
+  // invalid, and the client would have no way to spot that.
+  if (patch.coverMediaAssetId !== undefined) {
+    patchToApply.coverMediaAssetId = await resolveAndValidateCover({
+      userId,
+      type: nextType,
+      coverMediaAssetId: patch.coverMediaAssetId,
+    });
+  } else if (patch.type !== undefined && !POST_TYPE_RULES[nextType].allowsCover && post.coverMediaAssetId) {
+    logger.info('Auto-clearing cover on type change', {
+      postId: id,
+      previousType: post.type,
+      newType: nextType,
+    });
+    patchToApply.coverMediaAssetId = null;
   }
 
   if (patch.scheduledFor !== undefined) {
@@ -184,8 +225,9 @@ async function archivePost(id, userId) {
  * posts or orphaned PostMedia.
  *
  * After the post row is gone, we fire-and-forget an orphan check on each
- * MediaAsset it referenced — if no other post uses that media, we free
- * Cloudinary storage. Failures there never bubble up (silent by design).
+ * MediaAsset it referenced — including the cover, if any — if no other
+ * post uses that media, we free Cloudinary storage. Failures there never
+ * bubble up (silent by design).
  */
 async function deletePost(id, userId) {
   const post = await getPost(id, userId);
@@ -204,6 +246,13 @@ async function deletePost(id, userId) {
     .map((pm) => pm.mediaAssetId ?? pm.mediaAsset?.id)
     .filter(Boolean);
 
+  // Rodada 2b: cover is a separate direct FK, not a PostMedia join. It also
+  // deserves an orphan check — a user who deletes their only reel deletes
+  // the last thing keeping that cover image around.
+  if (post.coverMediaAssetId) {
+    mediaAssetIds.push(post.coverMediaAssetId);
+  }
+
   await postRepository.deleteById(id);
 
   logger.info('Scheduled post deleted', {
@@ -215,7 +264,9 @@ async function deletePost(id, userId) {
 
   // Fire-and-forget: don't block the HTTP response on Cloudinary cleanup.
   // deleteIfOrphan is silent — internal failures are logged, never thrown.
-  for (const mediaId of mediaAssetIds) {
+  // De-dupe via Set: an id can't be both a PostMedia entry and the cover
+  // for the same post in practice, but the Set is cheap insurance.
+  for (const mediaId of new Set(mediaAssetIds)) {
     mediaService.deleteIfOrphan(mediaId, userId).catch((err) => {
       logger.warn('Orphan media cleanup rejected unexpectedly', {
         mediaId,
@@ -332,6 +383,51 @@ async function resolveAndValidateMedias({ userId, type, mediaIds }) {
 }
 
 /**
+ * Rodada 2b: normalize + validate an optional cover media id.
+ *
+ * Returns:
+ *   - null when the input is null/undefined/empty (no cover — Meta picks a
+ *     frame at publish time)
+ *   - the same id string when it passes all checks
+ *
+ * Throws AppError when:
+ *   - the post type doesn't accept a custom cover (only FEED_VIDEO and REEL do)
+ *   - the media id doesn't exist or belongs to a different user
+ *   - the media isn't an IMAGE (Meta requires a still image URL for cover_url)
+ */
+async function resolveAndValidateCover({ userId, type, coverMediaAssetId }) {
+  if (coverMediaAssetId === null || coverMediaAssetId === undefined || coverMediaAssetId === '') {
+    return null;
+  }
+
+  if (!POST_TYPE_RULES[type]?.allowsCover) {
+    throw new AppError(
+      ErrorCodes.INVALID_MEDIA_FOR_POST_TYPE,
+      `Posts do tipo ${type} não aceitam capa customizada.`,
+      400
+    );
+  }
+
+  const cover = await mediaRepository.findById(coverMediaAssetId);
+  if (!cover || cover.userId !== userId) {
+    throw new AppError(
+      ErrorCodes.MEDIA_NOT_FOUND,
+      'Mídia da capa não encontrada.',
+      404
+    );
+  }
+  if (cover.type !== 'IMAGE') {
+    throw new AppError(
+      ErrorCodes.INVALID_MEDIA_FOR_POST_TYPE,
+      'A capa precisa ser uma imagem (JPG ou PNG).',
+      400
+    );
+  }
+
+  return coverMediaAssetId;
+}
+
+/**
  * Accepts an ISO string or Date. Returns:
  *   - null if omitted (post stays DRAFT)
  *   - Date if valid and in the future (>= now + 1 minute cushion)
@@ -363,6 +459,10 @@ function normalizeScheduledFor(input) {
 
 // Stable public shape returned to the frontend. Hides Prisma-specific fields
 // and the internal ordering of medias.
+//
+// Rodada 2b: exposes the cover as `cover` — same nested shape as the
+// entries in `medias`, so the frontend can render it with the same
+// thumbnail component. Null when the post has no custom cover.
 function toPublicShape(post) {
   return {
     id: post.id,
@@ -383,6 +483,15 @@ function toPublicShape(post) {
       height: pm.mediaAsset.height,
       durationSec: pm.mediaAsset.durationSec,
     })),
+    cover: post.coverMediaAsset
+      ? {
+          id: post.coverMediaAsset.id,
+          type: post.coverMediaAsset.type,
+          url: post.coverMediaAsset.url,
+          width: post.coverMediaAsset.width,
+          height: post.coverMediaAsset.height,
+        }
+      : null,
     createdAt: post.createdAt,
     updatedAt: post.updatedAt,
   };

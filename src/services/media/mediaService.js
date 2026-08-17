@@ -8,13 +8,16 @@ const env = require('../../config/env');
 const { AppError, ErrorCodes } = require('../../utils/errors');
 const logger = require('../../utils/logger');
 
-// Direct Prisma access — used only by deleteIfOrphan to count PostMedia
-// references. Kept here (rather than in a new mediaRepository method) to
-// stay inside the 11-file scope of Rodada 1. If more of these accumulate,
-// promote to mediaRepository.countPostReferences(mediaId).
-// Assumes config/database exports `{ prisma }`. If your module exports
-// prisma directly, change to: const prisma = require('../../config/database');
-const { prisma } = require('../../config/database');
+// Direct Prisma access — used only by deleteIfOrphan to count references
+// from PostMedia AND from ScheduledPost.coverMediaAssetId (Rodada 2b).
+// Kept here rather than growing new repository methods just for these two
+// counts. If more direct-count queries accumulate, promote to a repo helper.
+//
+// Rodada 2b: config/database exports prisma DIRECTLY (module.exports = prisma),
+// NOT as a named export — same pattern used by scheduledPostRepository.js.
+// The Rodada 1 version of this file had `const { prisma } = require(...)`
+// which silently gave `undefined` and made deleteIfOrphan fail silently.
+const prisma = require('../../config/database');
 
 const IMAGE_MIMES = new Set(env.uploads.allowedImageMimes);
 const VIDEO_MIMES = new Set(env.uploads.allowedVideoMimes);
@@ -120,13 +123,18 @@ async function deleteById(id, userId) {
 
 /**
  * Silent orphan cleanup: if this media is no longer referenced by any
- * ScheduledPost (via PostMedia), delete it from Cloudinary and from the
- * DB. Anything unexpected is logged and swallowed — callers are typically
- * running this fire-and-forget after deletePost and must not have their
- * HTTP response gated on Cloudinary latency.
+ * ScheduledPost — neither via PostMedia nor as a coverMediaAssetId —
+ * delete it from Cloudinary and from the DB. Anything unexpected is
+ * logged and swallowed — callers are typically running this
+ * fire-and-forget after deletePost and must not have their HTTP
+ * response gated on Cloudinary latency.
  *
  * Ownership is enforced: we won't touch another user's media, even if a
  * caller passes the wrong id (defense in depth).
+ *
+ * Rodada 2b: previously only counted PostMedia rows. Now also counts
+ * ScheduledPost.coverMediaAssetId — a media used as cover for another
+ * post is not orphaned even if no PostMedia references it.
  *
  * @param {string} mediaId
  * @param {string} userId
@@ -144,13 +152,17 @@ async function deleteIfOrphan(mediaId, userId) {
       return;
     }
 
-    const referenceCount = await prisma.postMedia.count({
-      where: { mediaAssetId: mediaId },
-    });
-    if (referenceCount > 0) {
+    const [postMediaCount, coverCount] = await Promise.all([
+      prisma.postMedia.count({ where: { mediaAssetId: mediaId } }),
+      prisma.scheduledPost.count({ where: { coverMediaAssetId: mediaId } }),
+    ]);
+    const totalRefs = postMediaCount + coverCount;
+
+    if (totalRefs > 0) {
       logger.info('deleteIfOrphan: media still referenced, keeping', {
         mediaId,
-        referenceCount,
+        postMediaCount,
+        coverCount,
       });
       return;
     }

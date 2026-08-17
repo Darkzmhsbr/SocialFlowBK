@@ -8,11 +8,13 @@ const { AppError, ErrorCodes } = require('../utils/errors');
 //     instagramAccountId: string,
 //     type: "FEED_IMAGE" | "FEED_VIDEO" | "FEED_CAROUSEL" | "REEL" | "STORY",
 //     caption?: string,
-//     mediaIds: string[],     // ordered
-//     scheduledFor?: string   // ISO; omit to save as DRAFT
+//     mediaIds: string[],         // ordered
+//     scheduledFor?: string,      // ISO; omit to save as DRAFT
+//     coverMediaAssetId?: string  // Rodada 2b: optional custom cover for FEED_VIDEO/REEL
+//                                 // (must be an IMAGE the user owns)
 //   }
 const createPost = async (req, res) => {
-  const { instagramAccountId, type, caption, mediaIds, scheduledFor } = req.body || {};
+  const { instagramAccountId, type, caption, mediaIds, scheduledFor, coverMediaAssetId } = req.body || {};
 
   if (!instagramAccountId || !type || !mediaIds) {
     throw new AppError(
@@ -29,6 +31,7 @@ const createPost = async (req, res) => {
     caption,
     mediaIds,
     scheduledFor,
+    coverMediaAssetId,
   });
 
   return ok(res, { post: postService.toPublicShape(post) });
@@ -51,7 +54,8 @@ const getPost = async (req, res) => {
 };
 
 // PATCH /api/posts/:id
-// Body accepts any subset of: caption, type, mediaIds, scheduledFor
+// Body accepts any subset of: caption, type, mediaIds, scheduledFor, coverMediaAssetId
+// Rodada 2b: coverMediaAssetId semantics — undefined omits, null clears, string sets.
 const updatePost = async (req, res) => {
   const post = await postService.updatePost(req.params.id, req.userId, req.body || {});
   return ok(res, { post: postService.toPublicShape(post) });
@@ -63,7 +67,8 @@ const archivePost = async (req, res) => {
   return ok(res, { post: postService.toPublicShape(post) });
 };
 
-// DELETE /api/posts/:id  (only for DRAFT; other states must be archived)
+// DELETE /api/posts/:id
+// Rodada 1 relaxed this to accept any status except QUEUED/PUBLISHING.
 const deletePost = async (req, res) => {
   const result = await postService.deletePost(req.params.id, req.userId);
   return ok(res, { deleted: result });

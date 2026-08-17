@@ -18,6 +18,10 @@
 //     the default user is retired).
 //   - InviteCode: single-use, optionally expiring token used to gate
 //     registration during the closed beta.
+//
+// Rodada 2b (Fase 2.2b) addition:
+//   - ScheduledPost.coverMediaAsset: optional custom cover image for
+//     videos and reels. When null, Meta picks a frame automatically.
 
 generator client {
   provider = "prisma-client-js"
@@ -110,6 +114,9 @@ model MediaAsset {
   createdAt          DateTime  @default(now())
 
   postMedias         PostMedia[]
+  // Rodada 2b: same MediaAsset can be referenced as cover art by many
+  // ScheduledPosts. Back-relation to ScheduledPost.coverMediaAsset.
+  postCovers         ScheduledPost[]
 
   @@index([userId])
   @@map("media_assets")
@@ -149,6 +156,14 @@ model ScheduledPost {
   failureReason      String?             @db.Text
   retryCount         Int                 @default(0)
 
+  // Rodada 2b: optional custom cover for FEED_VIDEO and REEL. Meta wants
+  // this as a URL (cover_url) at container creation time. onDelete: SetNull
+  // means deleting the MediaAsset used as cover just clears this field —
+  // the post itself survives and Meta picks a frame automatically at
+  // publish time. Enforced to be an IMAGE by scheduledPostService.
+  coverMediaAssetId  String?
+  coverMediaAsset    MediaAsset?         @relation(fields: [coverMediaAssetId], references: [id], onDelete: SetNull)
+
   createdAt          DateTime            @default(now())
   updatedAt          DateTime            @updatedAt
 
@@ -159,6 +174,7 @@ model ScheduledPost {
   @@index([userId])
   @@index([instagramAccountId])
   @@index([status, scheduledFor])
+  @@index([coverMediaAssetId])
   @@map("scheduled_posts")
 }
 

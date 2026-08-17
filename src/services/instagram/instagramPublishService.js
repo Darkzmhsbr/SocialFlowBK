@@ -6,11 +6,14 @@
 //   - deciding whether an error is worth retrying
 //
 // Rodada 2a: worker now supports ALL post types (FEED_IMAGE, FEED_VIDEO,
-// REEL, FEED_CAROUSEL, STORY). Custom Reel/Video cover images (cover_url)
-// are still 2b — Meta picks a frame automatically for now.
+// REEL, FEED_CAROUSEL, STORY).
+//
+// Rodada 2b: FEED_VIDEO and REEL now forward the post's custom cover URL
+// (post.coverMediaAsset.url) to Meta as cover_url. When absent — either
+// the user didn't pick one, or the cover MediaAsset was deleted (SetNull
+// on the FK) — we send no cover_url and Meta picks a frame automatically.
 //
 // Not implemented (out of scope, tracked in roadmap):
-//   - Rodada 2b: cover_url for videos/reels, requires DB migration
 //   - Rodada 3:  post-publish metrics fetch (Insights API)
 //   - Rodada 4:  visual Story editor (canvas + text/stickers baked in)
 
@@ -144,11 +147,18 @@ async function publishFeedVideo(post, igUserId, caption, accessToken) {
     );
   }
 
+  // Rodada 2b: coverMediaAsset may be null (user didn't pick one, or the
+  // cover MediaAsset was deleted after being assigned — schema.prisma uses
+  // onDelete: SetNull on that FK). Either way, undefined coverUrl means
+  // "let Meta pick a frame".
+  const coverUrl = post.coverMediaAsset?.url || undefined;
+
   const { creationId } = await instagramMediaService.ensureVideoContainerReady({
     igUserId,
     videoUrl: media.url,
     caption,
     accessToken,
+    coverUrl,
   });
 
   const { mediaId } = await instagramApiClient.publishMediaContainer(
@@ -170,11 +180,14 @@ async function publishReel(post, igUserId, caption, accessToken) {
     );
   }
 
+  const coverUrl = post.coverMediaAsset?.url || undefined;
+
   const { creationId } = await instagramMediaService.ensureReelContainerReady({
     igUserId,
     videoUrl: media.url,
     caption,
     accessToken,
+    coverUrl,
     // shareToFeed defaults to true inside the helper — Instagram's own
     // default when posting a Reel from the app. Rodada 2b or later can
     // expose this as a per-post option in the composer.

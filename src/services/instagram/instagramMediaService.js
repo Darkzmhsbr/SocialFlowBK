@@ -15,6 +15,12 @@
 //   - ensureStoryContainerReady    -> STORY       (media_type=STORIES)
 //   - ensureCarouselContainerReady -> FEED_CAROUSEL (two-phase: children + parent)
 //
+// Rodada 2b: ensureVideoContainerReady and ensureReelContainerReady now
+// accept an optional coverUrl. When provided, Meta uses it as the thumbnail
+// image. When omitted, Meta picks a frame automatically (usually near the
+// start of the video). Cover URL must point to an IMAGE — validation lives
+// in scheduledPostService, this file trusts the caller.
+//
 // waitForContainerReady is shared by all of them and unchanged.
 
 const instagramApiClient = require('../../integrations/instagram/instagramApiClient');
@@ -62,19 +68,29 @@ async function ensureImageContainerReady({ igUserId, imageUrl, caption, accessTo
  * Video containers take longer to reach FINISHED than image containers
  * (Meta transcodes). If pollTimeoutMs is too tight for real user videos,
  * bump WORKER_POLL_TIMEOUT_MS in Railway env — no code change needed.
+ *
+ * Rodada 2b: coverUrl optional. When set, Meta uses it as the video's
+ * thumbnail on the feed grid. When null/undefined, Meta auto-selects a
+ * frame — usually a frame near the very start, which is often blurry or
+ * mid-motion. That's why cover matters.
  */
-async function ensureVideoContainerReady({ igUserId, videoUrl, caption, accessToken }) {
+async function ensureVideoContainerReady({ igUserId, videoUrl, caption, accessToken, coverUrl }) {
   const { creationId } = await instagramApiClient.createMediaContainer(
     igUserId,
     {
       media_type: 'VIDEO',
       video_url: videoUrl,
       caption: caption || undefined,
+      cover_url: coverUrl || undefined,
     },
     accessToken
   );
 
-  logger.info('Instagram feed video container created', { igUserId, creationId });
+  logger.info('Instagram feed video container created', {
+    igUserId,
+    creationId,
+    hasCustomCover: Boolean(coverUrl),
+  });
 
   await waitForContainerReady({ creationId, accessToken });
   return { creationId };
@@ -85,10 +101,11 @@ async function ensureVideoContainerReady({ igUserId, videoUrl, caption, accessTo
  * the default we want (Reel appears both in Reels tab AND in the feed),
  * matching Instagram's own default when you post a Reel from the app.
  *
- * Custom cover is out of scope in Rodada 2a — coming in 2b via cover_url.
- * Without it, Meta picks a frame automatically (usually near the start).
+ * Rodada 2b: coverUrl optional (same semantics as feed video). Without it
+ * Meta picks a frame; with it, users get the polished thumbnail experience
+ * they'd get from the Instagram app's "Escolher capa" screen.
  */
-async function ensureReelContainerReady({ igUserId, videoUrl, caption, accessToken, shareToFeed = true }) {
+async function ensureReelContainerReady({ igUserId, videoUrl, caption, accessToken, coverUrl, shareToFeed = true }) {
   const { creationId } = await instagramApiClient.createMediaContainer(
     igUserId,
     {
@@ -96,11 +113,16 @@ async function ensureReelContainerReady({ igUserId, videoUrl, caption, accessTok
       video_url: videoUrl,
       caption: caption || undefined,
       share_to_feed: shareToFeed,
+      cover_url: coverUrl || undefined,
     },
     accessToken
   );
 
-  logger.info('Instagram reel container created', { igUserId, creationId });
+  logger.info('Instagram reel container created', {
+    igUserId,
+    creationId,
+    hasCustomCover: Boolean(coverUrl),
+  });
 
   await waitForContainerReady({ creationId, accessToken });
   return { creationId };
