@@ -7,7 +7,7 @@
 // works without a future migration reshaping the schema.
 //
 // Phase 2.1 additions (post scheduling foundation):
-//   - MediaAsset:    each uploaded image/video, backed by Cloudinary
+//   - MediaAsset:    each uploaded image/video, backed by object storage
 //   - ScheduledPost: the actual post (draft/scheduled/published/etc)
 //   - PostMedia:     pivot with `order` so carousels keep media sequence
 //     and the same MediaAsset can be reused across multiple posts
@@ -22,6 +22,14 @@
 // Rodada 2b (Fase 2.2b) addition:
 //   - ScheduledPost.coverMediaAsset: optional custom cover image for
 //     videos and reels. When null, Meta picks a frame automatically.
+//
+// Backblaze migration (Rodada storage) addition:
+//   - StorageProvider enum + MediaAsset.storageProvider: which backend
+//     hosts this asset. Legacy rows are CLOUDINARY; new uploads default
+//     to BACKBLAZE. Enables cutover without touching any existing URL.
+//   - cloudinaryPublicId column renamed to `storageKey` in code (via
+//     @map). Column name in the DB stays the same so no data migration
+//     is needed — only the Prisma-facing name is friendlier.
 
 generator client {
   provider = "prisma-client-js"
@@ -95,15 +103,30 @@ enum MediaType {
   VIDEO
 }
 
-// A single uploaded asset stored on Cloudinary. Never stores the file bytes -
-// only metadata + the public HTTPS URL that Instagram will fetch at publish time.
+// Which object storage hosts the asset. Legacy Cloudinary rows keep
+// working forever — their public URLs never change. New uploads default
+// to BACKBLAZE. The mediaService reads this field to route delete calls
+// to the correct client.
+enum StorageProvider {
+  CLOUDINARY
+  BACKBLAZE
+}
+
+// A single uploaded asset stored on an object storage provider. Never
+// stores the file bytes — only metadata + the public HTTPS URL that
+// Instagram will fetch at publish time.
 model MediaAsset {
   id                 String    @id @default(uuid())
   userId             String
   user               User      @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   type               MediaType
-  cloudinaryPublicId String    @unique // used to delete/manage the asset on Cloudinary
+  // Provider-specific identifier. For CLOUDINARY it's the public_id used
+  // by their SDK; for BACKBLAZE it's the S3 object key (e.g.
+  // "users/<userId>/<uuid>.jpg"). Column name kept as "cloudinaryPublicId"
+  // via @map so this rename doesn't need a data migration.
+  storageKey         String    @unique @map("cloudinaryPublicId")
+  storageProvider    StorageProvider @default(BACKBLAZE)
   url                String              // HTTPS delivery URL (what Instagram fetches)
   format             String              // "jpg", "png", "mp4", "mov"
   bytes              Int

@@ -1,0 +1,1 @@
+UPDATE media_assets SET "storageProvider" = 'CLOUDINARY';

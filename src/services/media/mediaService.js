@@ -1,8 +1,9 @@
 // Business logic for media uploads. Sits between the controller (which
-// only cares about HTTP) and Cloudinary + Prisma. Every rule that decides
-// "is this file allowed?" lives here.
+// only cares about HTTP) and the storage provider + Prisma. Every rule
+// that decides "is this file allowed?" lives here.
 
 const cloudinaryClient = require('../../integrations/cloudinary/cloudinaryClient');
+const b2Client = require('../../integrations/backblaze/b2Client');
 const mediaRepository = require('../../database/mediaRepository');
 const env = require('../../config/env');
 const { AppError, ErrorCodes } = require('../../utils/errors');
@@ -12,18 +13,19 @@ const logger = require('../../utils/logger');
 // from PostMedia AND from ScheduledPost.coverMediaAssetId (Rodada 2b).
 // Kept here rather than growing new repository methods just for these two
 // counts. If more direct-count queries accumulate, promote to a repo helper.
-//
-// Rodada 2b: config/database exports prisma DIRECTLY (module.exports = prisma),
+// Note: config/database exports prisma DIRECTLY (module.exports = prisma),
 // NOT as a named export — same pattern used by scheduledPostRepository.js.
-// The Rodada 1 version of this file had `const { prisma } = require(...)`
-// which silently gave `undefined` and made deleteIfOrphan fail silently.
 const prisma = require('../../config/database');
 
 const IMAGE_MIMES = new Set(env.uploads.allowedImageMimes);
 const VIDEO_MIMES = new Set(env.uploads.allowedVideoMimes);
 
+// Provider used for every NEW upload from this migration onward.
+// Legacy rows keep their original provider on MediaAsset.storageProvider.
+const DEFAULT_PROVIDER = 'BACKBLAZE';
+
 /**
- * Handle a fresh upload: validate, push to Cloudinary, save the row.
+ * Handle a fresh upload: validate, push to storage, save the row.
  *
  * @param {object} args
  * @param {string} args.userId
@@ -44,18 +46,23 @@ async function uploadFile({ userId, file }) {
     mimetype: file.mimetype,
     bytes: file.size,
     type,
+    provider: DEFAULT_PROVIDER,
   });
 
-  const uploaded = await cloudinaryClient.uploadBuffer(file.buffer, {
+  // New uploads always go to Backblaze. Cloudinary is kept only for
+  // deleting legacy rows via deleteAsset below.
+  const uploaded = await b2Client.uploadBuffer(file.buffer, {
     userId,
     resourceType,
+    mimetype: file.mimetype,
     filename: file.originalname,
   });
 
   const asset = await mediaRepository.create({
     userId,
     type,
-    cloudinaryPublicId: uploaded.publicId,
+    storageKey: uploaded.storageKey,
+    storageProvider: DEFAULT_PROVIDER,
     url: uploaded.url,
     format: uploaded.format,
     bytes: uploaded.bytes,
@@ -67,7 +74,8 @@ async function uploadFile({ userId, file }) {
   logger.info('Media upload saved', {
     userId,
     mediaId: asset.id,
-    cloudinaryPublicId: asset.cloudinaryPublicId,
+    storageKey: asset.storageKey,
+    storageProvider: asset.storageProvider,
     type: asset.type,
   });
 
@@ -110,13 +118,11 @@ async function getById(id, userId) {
 
 async function deleteById(id, userId) {
   const asset = await getById(id, userId);
-  const resourceType = asset.type === 'VIDEO' ? 'video' : 'image';
 
-  // Try Cloudinary first, but don't fail the whole operation if it errors -
-  // the file may already have been removed, or the account key rotated.
-  // The DB row is the source of truth for the user; orphans get cleaned up
-  // out-of-band if needed.
-  await cloudinaryClient.deleteAsset(asset.cloudinaryPublicId, resourceType);
+  // Route to the correct storage client based on where the asset lives.
+  // Legacy Cloudinary media stays reachable forever — we don't force a
+  // migration; we just delete from the right place when the user removes it.
+  await deleteFromStorage(asset);
   await mediaRepository.deleteById(id);
   return { id };
 }
@@ -124,17 +130,13 @@ async function deleteById(id, userId) {
 /**
  * Silent orphan cleanup: if this media is no longer referenced by any
  * ScheduledPost — neither via PostMedia nor as a coverMediaAssetId —
- * delete it from Cloudinary and from the DB. Anything unexpected is
- * logged and swallowed — callers are typically running this
+ * delete it from its storage provider and from the DB. Anything unexpected
+ * is logged and swallowed — callers are typically running this
  * fire-and-forget after deletePost and must not have their HTTP
- * response gated on Cloudinary latency.
+ * response gated on storage latency.
  *
  * Ownership is enforced: we won't touch another user's media, even if a
  * caller passes the wrong id (defense in depth).
- *
- * Rodada 2b: previously only counted PostMedia rows. Now also counts
- * ScheduledPost.coverMediaAssetId — a media used as cover for another
- * post is not orphaned even if no PostMedia references it.
  *
  * @param {string} mediaId
  * @param {string} userId
@@ -167,17 +169,14 @@ async function deleteIfOrphan(mediaId, userId) {
       return;
     }
 
-    const resourceType = asset.type === 'VIDEO' ? 'video' : 'image';
-    // Cloudinary first, DB second — same ordering as deleteById. If
-    // Cloudinary fails the row stays and we log; a manual retry (or the
-    // next deletePost that touches it) will finish the job.
-    await cloudinaryClient.deleteAsset(asset.cloudinaryPublicId, resourceType);
+    await deleteFromStorage(asset);
     await mediaRepository.deleteById(mediaId);
 
     logger.info('Orphan media cleaned up', {
       mediaId,
       userId,
-      cloudinaryPublicId: asset.cloudinaryPublicId,
+      storageKey: asset.storageKey,
+      storageProvider: asset.storageProvider,
     });
   } catch (err) {
     // Silent by contract. Never bubbles up.
@@ -189,8 +188,31 @@ async function deleteIfOrphan(mediaId, userId) {
   }
 }
 
+/**
+ * Dispatches to the right client based on where the asset is stored.
+ * Never throws — both clients handle their own errors (log + return null).
+ * Kept internal to this file so the switch lives in exactly one place.
+ */
+async function deleteFromStorage(asset) {
+  const resourceType = asset.type === 'VIDEO' ? 'video' : 'image';
+  if (asset.storageProvider === 'CLOUDINARY') {
+    return cloudinaryClient.deleteAsset(asset.storageKey, resourceType);
+  }
+  // Default (and future) provider is BACKBLAZE. Guards against an unknown
+  // enum value by logging rather than throwing — the DB delete continues
+  // and the object becomes orphan storage (small cost, easy to audit later).
+  if (asset.storageProvider !== 'BACKBLAZE') {
+    logger.warn('deleteFromStorage: unknown storageProvider, skipping', {
+      mediaId: asset.id,
+      storageProvider: asset.storageProvider,
+    });
+    return null;
+  }
+  return b2Client.deleteAsset(asset.storageKey, resourceType);
+}
+
 // Strips storage-specific internals before returning to the frontend. The
-// public shape is stable even if we change providers later.
+// public shape is stable regardless of which provider hosts the file.
 function toPublicShape(asset) {
   return {
     id: asset.id,

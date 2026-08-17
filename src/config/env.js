@@ -46,9 +46,9 @@ const env = {
       'instagram_business_basic,instagram_business_content_publish',
   },
 
-  // Cloudinary hosts every uploaded image/video. The public HTTPS URL it
-  // returns is what Instagram fetches at publish time. Only the backend
-  // knows the api_secret - the frontend never sees it.
+  // Cloudinary section KEPT so legacy MediaAsset rows (storageProvider =
+  // CLOUDINARY) continue to work — mainly for delete calls issued by
+  // deleteIfOrphan on old media. No new uploads go here anymore.
   cloudinary: {
     cloudName: required('CLOUDINARY_CLOUD_NAME'),
     apiKey: required('CLOUDINARY_API_KEY'),
@@ -56,6 +56,29 @@ const env = {
     // Folder where every asset gets nested. Individual users are further
     // separated by userId subfolder inside the service layer.
     rootFolder: process.env.CLOUDINARY_ROOT_FOLDER || 'socialflow',
+  },
+
+  // Backblaze B2 via its S3-compatible API. Every new MediaAsset lands
+  // here from this migration onward. Public bucket + friendly URL means
+  // Meta can fetch image_url / video_url / cover_url directly with no
+  // signing overhead per publish.
+  //
+  // publicBaseUrl format is https://f<NNN>.backblazeb2.com — the NNN
+  // maps to the region (e.g. f005 for us-east-005). If you migrate to
+  // another region, change this env, not the code.
+  backblaze: {
+    endpoint: required('B2_ENDPOINT'),               // e.g. https://s3.us-east-005.backblazeb2.com
+    region: required('B2_REGION'),                   // e.g. us-east-005
+    keyId: required('B2_KEY_ID'),                    // Application Key keyID
+    applicationKey: required('B2_APPLICATION_KEY'),  // Application Key applicationKey (secret)
+    bucketName: required('B2_BUCKET_NAME'),          // e.g. socialflow-media-zenyx
+    bucketId: required('B2_BUCKET_ID'),              // stored for future analytics / native B2 calls
+    // Public base URL used to build the URL we save on MediaAsset.url.
+    // Full URL becomes: {publicBaseUrl}/file/{bucketName}/{objectKey}
+    publicBaseUrl: required('B2_PUBLIC_BASE_URL'),   // e.g. https://f005.backblazeb2.com
+    // Prefix for every object key we upload. Individual users are further
+    // separated by userId subfolder inside the service layer.
+    rootFolder: process.env.B2_ROOT_FOLDER || 'socialflow',
   },
 
   // Upload limits enforced by multer + the media service. Kept conservative

@@ -6,7 +6,8 @@ const prisma = require('../config/database');
 function create({
   userId,
   type,
-  cloudinaryPublicId,
+  storageKey,
+  storageProvider,
   url,
   format,
   bytes,
@@ -18,7 +19,11 @@ function create({
     data: {
       userId,
       type,
-      cloudinaryPublicId,
+      storageKey,
+      // Rely on the schema default (BACKBLAZE) when the caller omits this,
+      // so old code paths that haven't been updated still create BACKBLAZE
+      // rows — Cloudinary is legacy at this point.
+      ...(storageProvider ? { storageProvider } : {}),
       url,
       format,
       bytes,
