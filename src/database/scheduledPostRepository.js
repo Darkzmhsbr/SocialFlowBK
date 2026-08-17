@@ -241,6 +241,27 @@ function rescheduleForRetry(id, delayMs, failureReason) {
   });
 }
 
+// --- Rodada 3: insights cache -------------------------------------------
+
+/**
+ * Persist the fetched insights data alongside a timestamp so the service
+ * can check TTL on subsequent requests. Intentionally doesn't touch any
+ * other field on the row (status, caption, etc are the user's domain).
+ *
+ * @param {string} postId
+ * @param {object} insightsData - flat { reach: N, likes: N, ... } object
+ * @param {Date} updatedAt
+ */
+function saveInsightsCache(postId, insightsData, updatedAt) {
+  return prisma.scheduledPost.update({
+    where: { id: postId },
+    data: {
+      insightsData,
+      insightsUpdatedAt: updatedAt,
+    },
+  });
+}
+
 module.exports = {
   create,
   findById,
@@ -253,4 +274,5 @@ module.exports = {
   markPublished,
   markFailed,
   rescheduleForRetry,
+  saveInsightsCache,
 };

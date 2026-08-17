@@ -1,4 +1,5 @@
 const postService = require('../services/posts/scheduledPostService');
+const insightsService = require('../services/instagram/instagramInsightsService');
 const { ok } = require('../utils/apiResponse');
 const { AppError, ErrorCodes } = require('../utils/errors');
 
@@ -74,4 +75,20 @@ const deletePost = async (req, res) => {
   return ok(res, { deleted: result });
 };
 
-module.exports = { createPost, listPosts, getPost, updatePost, archivePost, deletePost };
+// GET /api/posts/:id/insights?refresh=true
+// Rodada 3: fetch Instagram metrics for a published post.
+// Uses a 1h cache by default; ?refresh=true forces a re-fetch from Meta.
+// Returns { insights, cachedAt, isStale, notice? }.
+const getPostInsights = async (req, res) => {
+  const forceRefresh = req.query.refresh === 'true' || req.query.refresh === '1';
+
+  const result = await insightsService.getInsights({
+    postId: req.params.id,
+    userId: req.userId,
+    forceRefresh,
+  });
+
+  return ok(res, result);
+};
+
+module.exports = { createPost, listPosts, getPost, updatePost, archivePost, deletePost, getPostInsights };

@@ -13,6 +13,7 @@
 //   6. Create media container            -> graph.instagram.com/{version}/{ig-user-id}/media
 //   7. Poll container status             -> graph.instagram.com/{version}/{creation-id}?fields=status_code
 //   8. Publish the container             -> graph.instagram.com/{version}/{ig-user-id}/media_publish
+//   9. Fetch media insights (Rodada 3)   -> graph.instagram.com/{version}/{media-id}/insights
 //
 // Data-plane calls use graph.instagram.com (Instagram Login flow host).
 // The old graph.facebook.com host belongs to the separate "Facebook Login
@@ -258,6 +259,52 @@ async function publishMediaContainer(igUserId, creationId, accessToken) {
   }
 }
 
+// --- Rodada 3: Insights / Metrics ----------------------------------------
+
+/**
+ * Fetch insights (metrics) for a single published media.
+ *
+ * Meta's /{media-id}/insights endpoint returns an array of metric objects:
+ *   { data: [{ name: "reach", values: [{ value: 42 }] }, ...] }
+ *
+ * Quirks/notes:
+ *   - `impressions` was deprecated July 2024 — DO NOT request it.
+ *   - `views` is only available for VIDEO/REEL, not IMAGE/CAROUSEL.
+ *   - Story insights are only available for 24h after publishing.
+ *   - Metrics for very new posts (<30 min) often return all zeros.
+ *   - Requires scope `instagram_business_manage_insights`.
+ *
+ * @param {string} mediaId       - ScheduledPost.instagramMediaId
+ * @param {string} accessToken   - decrypted long-lived token
+ * @param {string[]} metrics     - list of metric names to request
+ * @returns {Promise<Object<string, number>>}  e.g. { reach: 42, likes: 5 }
+ */
+async function fetchMediaInsights(mediaId, accessToken, metrics) {
+  try {
+    const { data } = await axios.get(`${apiBase()}/${mediaId}/insights`, {
+      params: {
+        metric: metrics.join(','),
+        access_token: accessToken,
+      },
+      timeout: 15000,
+    });
+
+    // Normalize Meta's verbose { data: [{ name, values: [{value}] }] }
+    // into a flat { metricName: number } object for easy consumption.
+    const result = {};
+    if (Array.isArray(data?.data)) {
+      for (const item of data.data) {
+        const value = item.values?.[0]?.value;
+        result[item.name] = typeof value === 'number' ? value : 0;
+      }
+    }
+    return result;
+  } catch (error) {
+    if (error instanceof AppError) throw error;
+    throw toAppError(error, 'Failed to fetch Instagram media insights');
+  }
+}
+
 function toAppError(error, contextMessage) {
   const metaError = error.response?.data?.error;
 
@@ -293,4 +340,5 @@ module.exports = {
   createMediaContainer,
   getMediaContainerStatus,
   publishMediaContainer,
+  fetchMediaInsights,
 };

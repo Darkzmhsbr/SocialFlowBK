@@ -23,13 +23,19 @@
 //   - ScheduledPost.coverMediaAsset: optional custom cover image for
 //     videos and reels. When null, Meta picks a frame automatically.
 //
-// Backblaze migration (Rodada storage) addition:
+// Backblaze migration addition:
 //   - StorageProvider enum + MediaAsset.storageProvider: which backend
 //     hosts this asset. Legacy rows are CLOUDINARY; new uploads default
 //     to BACKBLAZE. Enables cutover without touching any existing URL.
 //   - cloudinaryPublicId column renamed to `storageKey` in code (via
 //     @map). Column name in the DB stays the same so no data migration
 //     is needed — only the Prisma-facing name is friendlier.
+//
+// Rodada 3 addition (metrics/insights):
+//   - ScheduledPost.insightsData / insightsUpdatedAt: cache for Meta's
+//     media insights so we don't hammer their API on every modal open.
+//     Json column lets us store whatever shape Meta returns per post
+//     type without more migrations when metrics evolve.
 
 generator client {
   provider = "prisma-client-js"
@@ -186,6 +192,15 @@ model ScheduledPost {
   // publish time. Enforced to be an IMAGE by scheduledPostService.
   coverMediaAssetId  String?
   coverMediaAsset    MediaAsset?         @relation(fields: [coverMediaAssetId], references: [id], onDelete: SetNull)
+
+  // Rodada 3: metrics cache. insightsData holds the normalized shape
+  // produced by instagramInsightsService (see toPublicInsights() there).
+  // insightsUpdatedAt drives cache expiry (default TTL 1h). Both null
+  // until the user opens the metrics modal for the first time on this
+  // post. Json (not discrete columns) so new Meta metrics don't need
+  // another migration.
+  insightsData       Json?
+  insightsUpdatedAt  DateTime?
 
   createdAt          DateTime            @default(now())
   updatedAt          DateTime            @updatedAt
