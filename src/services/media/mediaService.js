@@ -8,6 +8,14 @@ const env = require('../../config/env');
 const { AppError, ErrorCodes } = require('../../utils/errors');
 const logger = require('../../utils/logger');
 
+// Direct Prisma access — used only by deleteIfOrphan to count PostMedia
+// references. Kept here (rather than in a new mediaRepository method) to
+// stay inside the 11-file scope of Rodada 1. If more of these accumulate,
+// promote to mediaRepository.countPostReferences(mediaId).
+// Assumes config/database exports `{ prisma }`. If your module exports
+// prisma directly, change to: const prisma = require('../../config/database');
+const { prisma } = require('../../config/database');
+
 const IMAGE_MIMES = new Set(env.uploads.allowedImageMimes);
 const VIDEO_MIMES = new Set(env.uploads.allowedVideoMimes);
 
@@ -110,6 +118,65 @@ async function deleteById(id, userId) {
   return { id };
 }
 
+/**
+ * Silent orphan cleanup: if this media is no longer referenced by any
+ * ScheduledPost (via PostMedia), delete it from Cloudinary and from the
+ * DB. Anything unexpected is logged and swallowed — callers are typically
+ * running this fire-and-forget after deletePost and must not have their
+ * HTTP response gated on Cloudinary latency.
+ *
+ * Ownership is enforced: we won't touch another user's media, even if a
+ * caller passes the wrong id (defense in depth).
+ *
+ * @param {string} mediaId
+ * @param {string} userId
+ * @returns {Promise<void>}
+ */
+async function deleteIfOrphan(mediaId, userId) {
+  try {
+    const asset = await mediaRepository.findById(mediaId);
+    if (!asset) return; // Already gone — nothing to do.
+    if (asset.userId !== userId) {
+      logger.warn('deleteIfOrphan skipped: ownership mismatch', {
+        mediaId,
+        requestedBy: userId,
+      });
+      return;
+    }
+
+    const referenceCount = await prisma.postMedia.count({
+      where: { mediaAssetId: mediaId },
+    });
+    if (referenceCount > 0) {
+      logger.info('deleteIfOrphan: media still referenced, keeping', {
+        mediaId,
+        referenceCount,
+      });
+      return;
+    }
+
+    const resourceType = asset.type === 'VIDEO' ? 'video' : 'image';
+    // Cloudinary first, DB second — same ordering as deleteById. If
+    // Cloudinary fails the row stays and we log; a manual retry (or the
+    // next deletePost that touches it) will finish the job.
+    await cloudinaryClient.deleteAsset(asset.cloudinaryPublicId, resourceType);
+    await mediaRepository.deleteById(mediaId);
+
+    logger.info('Orphan media cleaned up', {
+      mediaId,
+      userId,
+      cloudinaryPublicId: asset.cloudinaryPublicId,
+    });
+  } catch (err) {
+    // Silent by contract. Never bubbles up.
+    logger.warn('deleteIfOrphan failed silently', {
+      mediaId,
+      userId,
+      error: err.message,
+    });
+  }
+}
+
 // Strips storage-specific internals before returning to the frontend. The
 // public shape is stable even if we change providers later.
 function toPublicShape(asset) {
@@ -126,4 +193,4 @@ function toPublicShape(asset) {
   };
 }
 
-module.exports = { uploadFile, listByUser, getById, deleteById, toPublicShape };
+module.exports = { uploadFile, listByUser, getById, deleteById, deleteIfOrphan, toPublicShape };

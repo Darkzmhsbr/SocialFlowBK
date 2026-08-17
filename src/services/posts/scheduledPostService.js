@@ -9,6 +9,7 @@
 const postRepository = require('../../database/scheduledPostRepository');
 const mediaRepository = require('../../database/mediaRepository');
 const accountRepository = require('../../database/instagramAccountRepository');
+const mediaService = require('../media/mediaService');
 const { AppError, ErrorCodes } = require('../../utils/errors');
 const logger = require('../../utils/logger');
 
@@ -27,6 +28,11 @@ const VALID_TYPES = Object.keys(POST_TYPE_RULES);
 // Posts can only be edited by the user in these states. Once queued/publishing/
 // published, the API rejects edits (the user can archive and clone instead).
 const EDITABLE_STATUSES = new Set(['DRAFT', 'SCHEDULED', 'FAILED']);
+
+// The worker owns these states — deleting mid-publish causes duplicated
+// posts on Instagram or dangling PostMedia rows. Everything else is fair
+// game to delete (Rodada 1 relaxed this from DRAFT-only).
+const UNDELETABLE_STATUSES = new Set(['QUEUED', 'PUBLISHING']);
 
 /**
  * Create a new draft or scheduled post.
@@ -164,18 +170,61 @@ async function archivePost(id, userId) {
   return archived;
 }
 
+/**
+ * Deletes a scheduled post from the DB.
+ *
+ * IMPORTANT: for PUBLISHED posts this does NOT delete the actual post
+ * from Instagram — Meta's API doesn't expose a reliable delete endpoint
+ * for content published via the Content Publishing API, and even if it
+ * did, the user's mental model of "remove from SocialFlow" ≠ "remove from
+ * the world". The frontend confirm must make this explicit.
+ *
+ * QUEUED and PUBLISHING are refused because the worker is actively
+ * touching those rows; deleting mid-flight causes duplicated Instagram
+ * posts or orphaned PostMedia.
+ *
+ * After the post row is gone, we fire-and-forget an orphan check on each
+ * MediaAsset it referenced — if no other post uses that media, we free
+ * Cloudinary storage. Failures there never bubble up (silent by design).
+ */
 async function deletePost(id, userId) {
   const post = await getPost(id, userId);
-  // Only DRAFT is hard-deletable to avoid losing history of things that
-  // interacted with Instagram (or are about to).
-  if (post.status !== 'DRAFT') {
+
+  if (UNDELETABLE_STATUSES.has(post.status)) {
     throw new AppError(
       ErrorCodes.POST_INVALID_STATE,
-      'Apenas rascunhos podem ser excluídos. Use arquivar para outros estados.',
+      'Não é possível excluir um post que está na fila ou em publicação. Aguarde alguns instantes e tente novamente.',
       409
     );
   }
+
+  // Snapshot the media IDs before deleting the post (deleteById will cascade
+  // the PostMedia join rows, and we need those IDs for orphan cleanup after).
+  const mediaAssetIds = (post.medias || [])
+    .map((pm) => pm.mediaAssetId ?? pm.mediaAsset?.id)
+    .filter(Boolean);
+
   await postRepository.deleteById(id);
+
+  logger.info('Scheduled post deleted', {
+    userId,
+    postId: id,
+    previousStatus: post.status,
+    mediaAssetCount: mediaAssetIds.length,
+  });
+
+  // Fire-and-forget: don't block the HTTP response on Cloudinary cleanup.
+  // deleteIfOrphan is silent — internal failures are logged, never thrown.
+  for (const mediaId of mediaAssetIds) {
+    mediaService.deleteIfOrphan(mediaId, userId).catch((err) => {
+      logger.warn('Orphan media cleanup rejected unexpectedly', {
+        mediaId,
+        userId,
+        error: err.message,
+      });
+    });
+  }
+
   return { id };
 }
 

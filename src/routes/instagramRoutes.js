@@ -11,6 +11,12 @@ router.get('/callback', asyncHandler(controller.handleCallback));
 // Everything below requires a logged-in user.
 router.get('/authorize-url', requireAuth, asyncHandler(controller.getAuthorizeUrl));
 router.get('/accounts', requireAuth, asyncHandler(controller.listAccounts));
+
+// NOTE: /accounts/:id/status must be declared BEFORE /accounts/:id, or
+// Express would match ":id" first with id = ":id/status". Express does
+// route matching in declaration order and doesn't do longest-prefix.
+router.get('/accounts/:id/status', requireAuth, asyncHandler(controller.getAccountStatus));
+
 router.get('/accounts/:id', requireAuth, asyncHandler(controller.getAccount));
 router.delete('/accounts/:id', requireAuth, asyncHandler(controller.disconnectAccount));
 

@@ -1,6 +1,7 @@
 const env = require('../config/env');
 const authService = require('../services/instagram/instagramAuthService');
 const accountService = require('../services/instagram/instagramAccountService');
+const accountStatusService = require('../services/instagram/accountStatusService');
 const { ok, fail } = require('../utils/apiResponse');
 const { AppError, ErrorCodes } = require('../utils/errors');
 const logger = require('../utils/logger');
@@ -70,6 +71,18 @@ const getAccount = async (req, res) => {
   return ok(res, { account: accountService.toPublicShape(account) });
 };
 
+// GET /api/instagram/accounts/:id/status  (requires auth)
+// Everything the frontend "Status da conta" page needs in one shot:
+// identity, counters, last published preview, and best-effort live
+// Meta metrics (which may be null if the token/scope can't fetch them).
+const getAccountStatus = async (req, res) => {
+  const status = await accountStatusService.getAccountStatus({
+    accountId: req.params.id,
+    userId: req.userId,
+  });
+  return ok(res, status);
+};
+
 // DELETE /api/instagram/accounts/:id  (requires auth)
 const disconnectAccount = async (req, res) => {
   await accountService.disconnectAccount({
@@ -84,5 +97,6 @@ module.exports = {
   handleCallback,
   listAccounts,
   getAccount,
+  getAccountStatus,
   disconnectAccount,
 };
