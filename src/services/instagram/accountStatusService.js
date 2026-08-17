@@ -16,7 +16,7 @@
 const accountRepository = require('../../database/instagramAccountRepository');
 const { AppError, ErrorCodes } = require('../../utils/errors');
 const logger = require('../../utils/logger');
-const { prisma } = require('../../config/database');
+const prisma = require('../../config/database');
 
 // Statuses that count as "pending work" for this account — anything the
 // user still has queued up or waiting to publish. PUBLISHED is counted
