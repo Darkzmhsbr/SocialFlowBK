@@ -14,6 +14,7 @@
 //     Promote to scheduledPostRepository if we grow more of these.
 
 const accountRepository = require('../../database/instagramAccountRepository');
+const { decryptToken } = require('../../utils/crypto');
 const { AppError, ErrorCodes } = require('../../utils/errors');
 const logger = require('../../utils/logger');
 const prisma = require('../../config/database');
@@ -123,13 +124,16 @@ function toLastPublishedShape(post) {
  * and the surface area is trivial — if we add more read-only Meta calls,
  * consolidate them into the client with a shared error/retry policy.
  *
- * Assumes account.accessToken is a usable string. If your repository
- * stores it encrypted with a different field name, adjust here — but
- * note the outer function already handles fetch failures gracefully.
+ * The token is stored encrypted on the account row. We decrypt here
+ * (same pattern as instagramPublishService) and send the plaintext to
+ * Meta. The outer function already catches any error gracefully.
  */
 async function fetchMetaProfileMetrics(account) {
-  const token = account.accessToken;
-  if (!token) throw new Error('Access token missing on account');
+  if (!account.accessTokenEncrypted) {
+    throw new Error('Encrypted access token missing on account');
+  }
+
+  const token = decryptToken(account.accessTokenEncrypted);
 
   // Graph API v25 — same version the rest of the integration uses.
   const url =

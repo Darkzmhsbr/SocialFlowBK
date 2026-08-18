@@ -463,6 +463,10 @@ function normalizeScheduledFor(input) {
 // Rodada 2b: exposes the cover as `cover` — same nested shape as the
 // entries in `medias`, so the frontend can render it with the same
 // thumbnail component. Null when the post has no custom cover.
+//
+// Rodada 3: exposes instagramMediaId so the frontend can decide whether
+// to show the "Métricas" button (only for PUBLISHED posts with a valid
+// media id returned by Meta's /media_publish).
 function toPublicShape(post) {
   return {
     id: post.id,
@@ -473,6 +477,7 @@ function toPublicShape(post) {
     publishedAt: post.publishedAt,
     failureReason: post.failureReason,
     retryCount: post.retryCount,
+    instagramMediaId: post.instagramMediaId,
     instagramAccount: post.instagramAccount,
     medias: (post.medias || []).map((pm) => ({
       order: pm.order,
