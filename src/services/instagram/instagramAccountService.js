@@ -47,6 +47,28 @@ async function getAccount(id) {
 }
 
 async function disconnectAccount(id) {
+  // Correção (pós Rodada 4): desde a Fase 3.3 o controller chama
+  // disconnectAccount({ accountId, userId }), mas esta função esperava só o
+  // id em texto — o objeto inteiro chegava ao Prisma como `id` e a consulta
+  // falhava ("Argument `id`: Expected String, provided Object"). Aceita os
+  // dois formatos e, quando o userId vem junto, confirma que a conta
+  // pertence ao usuário logado antes de apagar.
+  let ownerUserId = null;
+  if (id && typeof id === 'object') {
+    ownerUserId = id.userId ?? null;
+    id = id.accountId;
+  }
+  if (!id || typeof id !== 'string') {
+    throw new AppError(ErrorCodes.VALIDATION_ERROR, 'Id da conta inválido.', 400);
+  }
+  if (ownerUserId) {
+    const owned = await accountRepository.findById(id);
+    if (!owned || owned.userId !== ownerUserId) {
+      // Same 404 as a missing account — never reveal that another user's id exists.
+      throw new AppError(ErrorCodes.NOT_FOUND, 'Conta não encontrada.', 404);
+    }
+  }
+
   await getAccount(id); // ensures it exists and gives a clean 404 otherwise
   await accountRepository.deleteById(id);
   logger.info('Instagram account disconnected', { accountId: id });
