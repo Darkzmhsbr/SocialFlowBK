@@ -39,13 +39,23 @@ const createPost = async (req, res) => {
 };
 
 // GET /api/posts?status=DRAFT&take=50&skip=0
+// Rodada 4.1: also accepts &accountId=<instagramAccountId> and returns
+// `total` (count with the same filters) for the pagination controls.
+// Response stays backward compatible: { posts } + { total, take, skip }.
 const listPosts = async (req, res) => {
   const take = Math.min(Number(req.query.take) || 50, 100);
   const skip = Number(req.query.skip) || 0;
   const status = req.query.status || undefined;
+  const instagramAccountId = req.query.accountId || undefined;
 
-  const posts = await postService.listPosts(req.userId, { status, take, skip });
-  return ok(res, { posts: posts.map(postService.toPublicShape) });
+  // Rodada 4.1: was postService.listPosts(req.userId, { status, take, skip })
+  const { posts, total } = await postService.listPostsPage(req.userId, {
+    status,
+    instagramAccountId,
+    take,
+    skip,
+  });
+  return ok(res, { posts: posts.map(postService.toPublicShape), total, take, skip });
 };
 
 // GET /api/posts/:id
@@ -142,6 +152,12 @@ const createBatch = async (req, res) => {
   return ok(res, { batch: postService.summarizeBatch(batchId, posts) });
 };
 
+// GET /api/posts/batch/limits
+// Rodada 4.1: limits + stagger defaults for the batch composer.
+const getBatchLimits = async (req, res) => {
+  return ok(res, { limits: postService.getBatchLimits() });
+};
+
 // GET /api/posts/batch/:batchId
 const getBatch = async (req, res) => {
   const posts = await postService.getBatch(req.params.batchId, req.userId);
@@ -171,3 +187,5 @@ module.exports.createBatch = createBatch;
 module.exports.getBatch = getBatch;
 module.exports.archiveBatch = archiveBatch;
 module.exports.deleteBatch = deleteBatch;
+// Rodada 4.1
+module.exports.getBatchLimits = getBatchLimits;

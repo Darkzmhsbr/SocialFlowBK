@@ -3,6 +3,8 @@
 // missing joins.
 
 const prisma = require('../config/database');
+// Rodada 4.1: ids for bulk inserts (createMany doesn't return rows).
+const crypto = require('crypto');
 
 // Always attached to reads so callers get { medias: [{ order, mediaAsset }] }.
 // Rodada 2b: also includes coverMediaAsset (optional custom cover art for
@@ -405,6 +407,88 @@ async function recoverStalePosts({ queuedBefore, publishingBefore }) {
   return { requeued: requeued.count, failed: failed.count };
 }
 
+// --- Rodada 4.1: pagination + bulk batch insert -------------------------
+
+/**
+ * One page of posts + the total matching the same filters (for the
+ * pagination controls). `id` is the last tie-breaker: posts created by a
+ * batch share createdAt (same INSERT) and often scheduledFor, and without
+ * a unique tie-breaker Postgres may return them in a different order on
+ * each page — items would repeat or vanish between pages.
+ */
+async function findPageByUserId(userId, { status, instagramAccountId, take = 50, skip = 0 } = {}) {
+  const where = {
+    userId,
+    ...(status ? { status } : {}),
+    ...(instagramAccountId ? { instagramAccountId } : {}),
+  };
+
+  const [posts, total] = await prisma.$transaction([
+    prisma.scheduledPost.findMany({
+      where,
+      orderBy: [{ scheduledFor: 'asc' }, { createdAt: 'desc' }, { id: 'asc' }],
+      take,
+      skip,
+      include: POST_INCLUDE,
+    }),
+    prisma.scheduledPost.count({ where }),
+  ]);
+
+  return { posts, total };
+}
+
+// Rows per INSERT. Keeps every statement far below Postgres's 65535 bind
+// parameter limit (posts have ~10 columns, post_media 4).
+const BULK_CHUNK_SIZE = 500;
+
+/**
+ * Fast path for big batches (up to thousands of posts). createBatch above
+ * runs one nested create per post (~4 queries each) — fine for dozens,
+ * slow for 2500. This one does chunked createMany for posts and for their
+ * PostMedia rows, all inside ONE transaction (all-or-nothing, same as
+ * createBatch). Ids are generated here so the media rows can reference
+ * their post. Returns the inserted post rows (scalar fields only — the
+ * caller only needs status/account/date for the batch summary).
+ *
+ * @param {Array<object>} postsData - same shape accepted by create()
+ */
+async function createBatchBulk(postsData) {
+  const postRows = postsData.map((data) => ({
+    id: crypto.randomUUID(),
+    userId: data.userId,
+    instagramAccountId: data.instagramAccountId,
+    type: data.type,
+    caption: data.caption ?? null,
+    status: data.status,
+    scheduledFor: data.scheduledFor ?? null,
+    coverMediaAssetId: data.coverMediaAssetId ?? null,
+    batchId: data.batchId ?? null,
+  }));
+
+  const mediaRows = [];
+  postRows.forEach((row, index) => {
+    for (const m of postsData[index].medias || []) {
+      mediaRows.push({
+        id: crypto.randomUUID(),
+        postId: row.id,
+        mediaAssetId: m.mediaAssetId,
+        order: m.order,
+      });
+    }
+  });
+
+  const operations = [];
+  for (let i = 0; i < postRows.length; i += BULK_CHUNK_SIZE) {
+    operations.push(prisma.scheduledPost.createMany({ data: postRows.slice(i, i + BULK_CHUNK_SIZE) }));
+  }
+  for (let i = 0; i < mediaRows.length; i += BULK_CHUNK_SIZE) {
+    operations.push(prisma.postMedia.createMany({ data: mediaRows.slice(i, i + BULK_CHUNK_SIZE) }));
+  }
+
+  await prisma.$transaction(operations);
+  return postRows;
+}
+
 module.exports = {
   create,
   findById,
@@ -425,4 +509,7 @@ module.exports = {
   archiveManyByIds,
   claimDuePostsFair,
   recoverStalePosts,
+  // Rodada 4.1
+  findPageByUserId,
+  createBatchBulk,
 };

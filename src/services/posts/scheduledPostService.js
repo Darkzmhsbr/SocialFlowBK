@@ -665,7 +665,9 @@ async function createBatch({
     }
   });
 
-  const posts = await postRepository.createBatch(postsData);
+  // Rodada 4.1: bulk insert (was postRepository.createBatch(postsData) —
+  // one nested create per post, too slow for batches with thousands of posts).
+  const posts = await postRepository.createBatchBulk(postsData);
 
   logger.info('Scheduled post batch created', {
     userId,
@@ -864,6 +866,40 @@ function shuffle(list) {
   return arr;
 }
 
+// -----------------------------------------------------------------------
+// Rodada 4.1: pagination / account filter on the posts list + batch limits
+// -----------------------------------------------------------------------
+
+/**
+ * Same validation as listPosts, plus an optional account filter and the
+ * total count. The account filter is always combined with userId in the
+ * query, so passing another user's account id simply returns nothing.
+ */
+async function listPostsPage(userId, { status, instagramAccountId, take = 50, skip = 0 } = {}) {
+  if (status && !isValidStatus(status)) {
+    throw new AppError(
+      ErrorCodes.VALIDATION_ERROR,
+      `Filtro de status inválido: ${status}.`,
+      400
+    );
+  }
+  return postRepository.findPageByUserId(userId, { status, instagramAccountId, take, skip });
+}
+
+/**
+ * Limits/defaults the batch composer must respect. Exposed to the
+ * frontend so raising a limit is just a Railway env change.
+ */
+function getBatchLimits() {
+  return {
+    maxItems: env.batch.maxItems,
+    maxAccounts: env.batch.maxAccounts,
+    maxPosts: env.batch.maxPosts,
+    defaultWindowMinutes: env.batch.defaultWindowMinutes,
+    defaultItemIntervalMinutes: env.batch.defaultItemIntervalMinutes,
+  };
+}
+
 module.exports = {
   createPost,
   listPosts,
@@ -879,4 +915,7 @@ module.exports = {
   archiveBatch,
   summarizeBatch,
   resolveSpintax,
+  // Rodada 4.1
+  listPostsPage,
+  getBatchLimits,
 };

@@ -14,6 +14,8 @@ router.get('/', asyncHandler(controller.listPosts));
 // reason as /:id/insights below — keeps "batch" from ever being read as
 // a post id.
 router.post('/batch', asyncHandler(controller.createBatch));
+// Rodada 4.1: must come BEFORE /batch/:batchId ("limits" isn't a batch id).
+router.get('/batch/limits', asyncHandler(controller.getBatchLimits));
 router.get('/batch/:batchId', asyncHandler(controller.getBatch));
 router.post('/batch/:batchId/archive', asyncHandler(controller.archiveBatch));
 router.delete('/batch/:batchId', asyncHandler(controller.deleteBatch));

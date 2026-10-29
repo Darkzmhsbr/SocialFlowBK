@@ -134,10 +134,13 @@ const env = {
 
   // Rodada 4 - multi-profile batch composer limits and stagger defaults.
   // One batch = N media items x M accounts posts.
+  // Rodada 4.1: defaults raised (were 20 / 30 / 300). The frontend reads
+  // these values from GET /api/posts/batch/limits, so changing the env
+  // vars on Railway is enough — no frontend deploy needed.
   batch: {
-    maxItems: Number(process.env.BATCH_MAX_ITEMS) || 20,
-    maxAccounts: Number(process.env.BATCH_MAX_ACCOUNTS) || 30,
-    maxPosts: Number(process.env.BATCH_MAX_POSTS) || 300,
+    maxItems: Number(process.env.BATCH_MAX_ITEMS) || 50,
+    maxAccounts: Number(process.env.BATCH_MAX_ACCOUNTS) || 50,
+    maxPosts: Number(process.env.BATCH_MAX_POSTS) || 2500,
     // Window (minutes) over which the accounts of ONE item are spread.
     defaultWindowMinutes: Number(process.env.BATCH_DEFAULT_WINDOW_MINUTES) || 30,
     // Gap (minutes) between consecutive items on the SAME account.

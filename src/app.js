@@ -8,7 +8,9 @@ const routes = require('./routes');
 const app = express();
 
 app.use(requestId);
-app.use(express.json());
+// Rodada 4.1: was express.json() (100kb default). A batch of 50 items, each
+// with its own 2200-char caption, can pass 100kb — 1mb keeps a wide margin.
+app.use(express.json({ limit: '1mb' }));
 
 // Only the configured frontend origin may call this API. No wildcard "*"
 // in production - see section 22 of the project brief.
