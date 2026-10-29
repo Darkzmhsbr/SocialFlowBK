@@ -189,3 +189,26 @@ module.exports.archiveBatch = archiveBatch;
 module.exports.deleteBatch = deleteBatch;
 // Rodada 4.1
 module.exports.getBatchLimits = getBatchLimits;
+
+// --- Rodada 5: "Publicar agora" -------------------------------------------
+
+// POST /api/posts/:id/publish-now
+// Returns { post, notice } — notice explains a pause if the account has one.
+const publishNow = async (req, res) => {
+  const { post, notice } = await postService.publishNow(req.params.id, req.userId);
+  return ok(res, { post: postService.toPublicShape(post), notice });
+};
+
+// POST /api/posts/batch/:batchId/publish-now
+// Body (optional): { intervalMinutes?: number, windowMinutes?: number }
+const publishBatchNow = async (req, res) => {
+  const { intervalMinutes, windowMinutes } = req.body || {};
+  const result = await postService.publishBatchNow(req.params.batchId, req.userId, {
+    intervalMinutes,
+    windowMinutes,
+  });
+  return ok(res, { requeued: result });
+};
+
+module.exports.publishNow = publishNow;
+module.exports.publishBatchNow = publishBatchNow;

@@ -130,6 +130,30 @@ const env = {
     // is deleted right after publishing. Set to false to always send the
     // original URL.
     uniqueMediaUrlPerAccount: bool('UNIQUE_MEDIA_URL_PER_ACCOUNT', true),
+    // Rodada 5 - minimum gap (minutes) between two publishes on the SAME
+    // account, enforced by the claim even if many posts are due at once
+    // (unstaggered batch, "Publicar agora", queue released after a pause).
+    // 0 disables.
+    accountMinGapMinutes: Number(process.env.ACCOUNT_MIN_GAP_MINUTES ?? 3),
+    // Rodada 5 - how long an account is paused after each kind of Meta
+    // limit. Its posts stay SCHEDULED and resume automatically.
+    rateLimitPauseMinutes: Number(process.env.RATE_LIMIT_PAUSE_MINUTES) || 30,
+    publishLimitPauseMinutes: Number(process.env.PUBLISH_LIMIT_PAUSE_MINUTES) || 120,
+    actionBlockPauseMinutes: Number(process.env.ACTION_BLOCK_PAUSE_MINUTES) || 360,
+    // Rodada 5 - ask Meta for the account's remaining daily publish quota
+    // before publishing (cached per account, ~1 call every 15 min).
+    checkPublishingLimit: bool('CHECK_PUBLISHING_LIMIT', true),
+  },
+
+  // Rodada 5 - periodic account health check (detects banned/restricted
+  // accounts and expired tokens even with nothing scheduled) + automatic
+  // long-lived token refresh before it expires.
+  health: {
+    enabled: bool('ACCOUNT_HEALTH_ENABLED', true),
+    runEveryMinutes: Number(process.env.ACCOUNT_HEALTH_RUN_MINUTES) || 5,
+    checkEachAccountEveryMinutes: Number(process.env.ACCOUNT_HEALTH_CHECK_MINUTES) || 30,
+    accountsPerRun: Number(process.env.ACCOUNT_HEALTH_PER_RUN) || 10,
+    refreshTokenDaysBeforeExpiry: Number(process.env.TOKEN_REFRESH_DAYS_BEFORE) || 10,
   },
 
   // Rodada 4 - multi-profile batch composer limits and stagger defaults.

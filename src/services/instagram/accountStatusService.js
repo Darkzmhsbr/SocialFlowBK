@@ -103,6 +103,12 @@ function toAccountShape(account) {
     // Token expiration lets the frontend show a "expira em X dias" hint
     // and nudge the user to reconnect before Meta invalidates it.
     tokenExpiresAt: account.tokenExpiresAt ?? null,
+    // Rodada 5: health / pause info for the status page.
+    publishPausedUntil: account.publishPausedUntil ?? null,
+    pauseReason: account.pauseReason ?? null,
+    lastErrorMessage: account.lastErrorMessage ?? null,
+    lastErrorAt: account.lastErrorAt ?? null,
+    lastHealthCheckAt: account.lastHealthCheckAt ?? null,
   };
 }
 

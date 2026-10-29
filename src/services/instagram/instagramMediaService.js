@@ -22,6 +22,13 @@
 // in scheduledPostService, this file trusts the caller.
 //
 // waitForContainerReady is shared by all of them and unchanged.
+//
+// Rodada 5: waitForContainerReady no longer polls every 3s. Meta's docs
+// recommend querying a container's status "once per minute, for no more
+// than 5 minutes"; polling every 3s burned each account's API quota and
+// caused "Application request limit reached" (code 4). Delays now grow
+// 10s -> 15s -> 20s -> 30s -> 45s -> 60s (never below WORKER_POLL_INTERVAL_MS):
+// ~9 calls in 5 minutes instead of ~100.
 
 const instagramApiClient = require('../../integrations/instagram/instagramApiClient');
 const env = require('../../config/env');
@@ -269,6 +276,8 @@ async function waitForContainerReady({ creationId, accessToken }) {
   const startedAt = Date.now();
   const timeout = env.worker.pollTimeoutMs;
   const interval = env.worker.pollIntervalMs;
+  // Rodada 5: progressive polling (see file header).
+  let pollAttempt = 0;
 
   // First poll happens immediately - images usually finish very fast so we
   // often skip the wait entirely on the first try.
@@ -305,8 +314,16 @@ async function waitForContainerReady({ creationId, accessToken }) {
       );
     }
 
-    await sleep(interval);
+    // Rodada 5: was sleep(interval) — fixed 3s.
+    await sleep(nextPollDelay(pollAttempt++, interval));
   }
+}
+
+// Rodada 5: progressive delays between status checks (ms).
+const POLL_DELAYS_MS = [10000, 15000, 20000, 30000, 45000, 60000];
+function nextPollDelay(attempt, minInterval) {
+  const step = POLL_DELAYS_MS[Math.min(attempt, POLL_DELAYS_MS.length - 1)];
+  return Math.max(step, Number(minInterval) || 0);
 }
 
 function sleep(ms) {

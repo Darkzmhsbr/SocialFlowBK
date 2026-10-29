@@ -18,6 +18,8 @@ router.post('/batch', asyncHandler(controller.createBatch));
 router.get('/batch/limits', asyncHandler(controller.getBatchLimits));
 router.get('/batch/:batchId', asyncHandler(controller.getBatch));
 router.post('/batch/:batchId/archive', asyncHandler(controller.archiveBatch));
+// Rodada 5: publish every pending post of the batch now (re-staggered).
+router.post('/batch/:batchId/publish-now', asyncHandler(controller.publishBatchNow));
 router.delete('/batch/:batchId', asyncHandler(controller.deleteBatch));
 
 // NOTE: /:id/insights must be declared BEFORE the bare /:id route, or
@@ -28,6 +30,8 @@ router.get('/:id/insights', asyncHandler(controller.getPostInsights));
 router.get('/:id', asyncHandler(controller.getPost));
 router.patch('/:id', asyncHandler(controller.updatePost));
 router.post('/:id/archive', asyncHandler(controller.archivePost));
+// Rodada 5: "Publicar agora" for a single post.
+router.post('/:id/publish-now', asyncHandler(controller.publishNow));
 router.delete('/:id', asyncHandler(controller.deletePost));
 
 module.exports = router;

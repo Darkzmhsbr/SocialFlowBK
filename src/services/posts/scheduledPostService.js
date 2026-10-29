@@ -900,6 +900,141 @@ function getBatchLimits() {
   };
 }
 
+// -----------------------------------------------------------------------
+// Rodada 5: "Publicar agora"
+// -----------------------------------------------------------------------
+
+const PUBLISH_NOW_STATUSES = new Set(['DRAFT', 'SCHEDULED', 'FAILED']);
+
+function pauseNotice(account) {
+  if (!account?.publishPausedUntil) return null;
+  const until = new Date(account.publishPausedUntil);
+  if (until <= new Date()) return null;
+  const when = until.toLocaleString('pt-BR', {
+    timeZone: 'America/Sao_Paulo',
+    day: '2-digit',
+    month: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+  return `@${account.username} está em pausa até ${when}${
+    account.pauseReason ? ` (${account.pauseReason})` : ''
+  }. O post sai assim que a pausa terminar.`;
+}
+
+/**
+ * Make one post due right now. DRAFT, SCHEDULED and FAILED are accepted
+ * (FAILED gets a fresh retry budget). The worker picks it up on the next
+ * tick (~30s), still respecting the account pause and minimum gap.
+ */
+async function publishNow(id, userId) {
+  const post = await getPost(id, userId);
+
+  if (!PUBLISH_NOW_STATUSES.has(post.status)) {
+    throw new AppError(
+      ErrorCodes.POST_INVALID_STATE,
+      `Este post não pode ser publicado agora (status: ${post.status}).`,
+      409
+    );
+  }
+
+  const account = post.instagramAccount;
+  if (!account || account.status !== 'ACTIVE') {
+    throw new AppError(
+      ErrorCodes.INSTAGRAM_ACCOUNT_INACTIVE,
+      `A conta @${account?.username || ''} está com problema (status: ${account?.status || 'desconhecido'}). Reconecte o perfil antes de publicar.`,
+      409
+    );
+  }
+
+  const changed = await postRepository.requeueNow(id, new Date());
+  if (changed === 0) {
+    throw new AppError(
+      ErrorCodes.POST_INVALID_STATE,
+      'O post acabou de entrar em publicação. Aguarde alguns instantes.',
+      409
+    );
+  }
+
+  const updated = await postRepository.findById(id);
+  logger.info('Post requeued to publish now', { userId, postId: id, previousStatus: post.status });
+
+  return {
+    post: updated,
+    notice: pauseNotice(account) || 'Post na fila: sai em até 1 minuto.',
+  };
+}
+
+/**
+ * Publish every pending post (DRAFT/SCHEDULED/FAILED) of a batch starting
+ * now, re-staggered so profiles don't all post the same second:
+ *   - profiles spread over windowMinutes, in random order
+ *   - posts of the same profile spaced by intervalMinutes (original order kept)
+ * Posts of accounts that are down are left untouched (reported as skipped).
+ */
+async function publishBatchNow(batchId, userId, { intervalMinutes, windowMinutes } = {}) {
+  const posts = await getBatch(batchId, userId);
+  const pending = posts.filter((p) => PUBLISH_NOW_STATUSES.has(p.status));
+  const eligible = pending.filter((p) => p.instagramAccount?.status === 'ACTIVE');
+  const skippedInactive = pending.length - eligible.length;
+
+  if (eligible.length === 0) {
+    throw new AppError(
+      ErrorCodes.POST_INVALID_STATE,
+      skippedInactive > 0
+        ? 'Os posts pendentes deste lote são de perfis com problema. Reconecte os perfis primeiro.'
+        : 'Nenhum post pendente para publicar neste lote.',
+      409
+    );
+  }
+
+  const interval = clampNumber(intervalMinutes, 0, 1440, env.batch.defaultItemIntervalMinutes);
+  const window = clampNumber(windowMinutes, 0, 720, 10);
+
+  const byAccount = new Map();
+  for (const post of eligible) {
+    if (!byAccount.has(post.instagramAccountId)) byAccount.set(post.instagramAccountId, []);
+    byAccount.get(post.instagramAccountId).push(post);
+  }
+
+  const accountIds = shuffle([...byAccount.keys()]);
+  const slotMs = accountIds.length > 0 ? (window * 60 * 1000) / accountIds.length : 0;
+  const startMs = Date.now() + 5000;
+  const entries = [];
+
+  accountIds.forEach((accountId, k) => {
+    const list = byAccount.get(accountId).sort((a, b) => {
+      const ta = a.scheduledFor ? new Date(a.scheduledFor).getTime() : 0;
+      const tb = b.scheduledFor ? new Date(b.scheduledFor).getTime() : 0;
+      return ta - tb || new Date(a.createdAt) - new Date(b.createdAt);
+    });
+    const baseMs = startMs + Math.floor(k * slotMs) + Math.floor(Math.random() * slotMs * 0.8);
+    list.forEach((post, j) => {
+      entries.push({ id: post.id, scheduledFor: new Date(baseMs + j * interval * 60 * 1000) });
+    });
+  });
+
+  const requeued = await postRepository.requeueMany(entries);
+  const times = entries.map((e) => e.scheduledFor.getTime());
+
+  logger.info('Batch requeued to publish now', {
+    userId,
+    batchId,
+    requeued,
+    skippedInactive,
+    intervalMinutes: interval,
+    windowMinutes: window,
+  });
+
+  return {
+    batchId,
+    requeued,
+    skippedInactive,
+    firstAt: new Date(Math.min(...times)),
+    lastAt: new Date(Math.max(...times)),
+  };
+}
+
 module.exports = {
   createPost,
   listPosts,
@@ -918,4 +1053,7 @@ module.exports = {
   // Rodada 4.1
   listPostsPage,
   getBatchLimits,
+  // Rodada 5
+  publishNow,
+  publishBatchNow,
 };

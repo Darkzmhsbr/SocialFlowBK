@@ -14,6 +14,7 @@
 //   7. Poll container status             -> graph.instagram.com/{version}/{creation-id}?fields=status_code
 //   8. Publish the container             -> graph.instagram.com/{version}/{ig-user-id}/media_publish
 //   9. Fetch media insights (Rodada 3)   -> graph.instagram.com/{version}/{media-id}/insights
+//  10. Publishing quota (Rodada 5)       -> graph.instagram.com/{version}/{ig-user-id}/content_publishing_limit
 //
 // Data-plane calls use graph.instagram.com (Instagram Login flow host).
 // The old graph.facebook.com host belongs to the separate "Facebook Login
@@ -331,6 +332,39 @@ function toAppError(error, contextMessage) {
   return new AppError(ErrorCodes.META_API_ERROR, 'Não foi possível comunicar com o Instagram.', 502);
 }
 
+// --- Rodada 5: publishing quota -------------------------------------------
+
+/**
+ * How many API-published posts the account used in the current rolling
+ * 24h window, and its total quota. Used by the publish service to pause an
+ * account BEFORE Meta rejects the publish.
+ *
+ * Meta returns { data: [{ quota_usage: 12, config: { quota_total: 100, quota_duration: 86400 } }] }
+ *
+ * @returns {Promise<{ quotaUsage: number|null, quotaTotal: number|null, quotaDurationSec: number|null }>}
+ */
+async function fetchContentPublishingLimit(igUserId, accessToken) {
+  try {
+    const { data } = await axios.get(`${apiBase()}/${igUserId}/content_publishing_limit`, {
+      params: {
+        fields: 'quota_usage,config',
+        access_token: accessToken,
+      },
+      timeout: 15000,
+    });
+
+    const row = Array.isArray(data?.data) ? data.data[0] : data;
+    return {
+      quotaUsage: typeof row?.quota_usage === 'number' ? row.quota_usage : null,
+      quotaTotal: typeof row?.config?.quota_total === 'number' ? row.config.quota_total : null,
+      quotaDurationSec: typeof row?.config?.quota_duration === 'number' ? row.config.quota_duration : null,
+    };
+  } catch (error) {
+    if (error instanceof AppError) throw error;
+    throw toAppError(error, 'Failed to fetch Instagram content publishing limit');
+  }
+}
+
 module.exports = {
   buildAuthorizationUrl,
   exchangeCodeForShortLivedToken,
@@ -341,4 +375,6 @@ module.exports = {
   getMediaContainerStatus,
   publishMediaContainer,
   fetchMediaInsights,
+  // Rodada 5
+  fetchContentPublishingLimit,
 };

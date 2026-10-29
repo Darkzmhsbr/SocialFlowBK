@@ -44,6 +44,14 @@
 //     separate table: batch status is derived by grouping posts. Applied
 //     in production via POST /api/setup/migrate-rodada4-batch (idempotent
 //     SQL), so `prisma db push` is not required for this change.
+//
+// Rodada 5 additions (account health + notifications):
+//   - InstagramAccount: publishPausedUntil / pauseReason (worker skips the
+//     account until then — Meta rate limit, daily publish limit, action
+//     block) and lastError* / lastHealthCheckAt (periodic health check).
+//   - Notification: messages shown in the header bell (account down,
+//     account paused, batch finished, posts failed).
+//   Applied via POST|GET /api/setup/migrate-rodada5-health (idempotent SQL).
 
 generator client {
   provider = "prisma-client-js"
@@ -73,6 +81,9 @@ model User {
   invitesCreated InviteCode[] @relation("InviteCreator")
   inviteUsed     InviteCode?  @relation("InviteConsumer")
 
+  // Rodada 5: header notifications
+  notifications  Notification[]
+
   @@map("users")
 }
 
@@ -87,6 +98,14 @@ model InstagramAccount {
   id     String @id @default(uuid())
   userId String
   user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Rodada 5: publishing pause + health. All nullable; cleared on reconnect.
+  publishPausedUntil DateTime?
+  pauseReason        String?   @db.Text
+  lastErrorCode      String?
+  lastErrorMessage   String?   @db.Text
+  lastErrorAt        DateTime?
+  lastHealthCheckAt  DateTime?
 
   instagramUserId  String @unique // ID returned by Meta for the authorized IG account
   username         String
@@ -267,4 +286,33 @@ model InviteCode {
 
   @@index([createdById])
   @@map("invite_codes")
+}
+
+// --- Rodada 5: notifications ---------------------------------------------
+
+// One message in the header bell. type is a free string (ACCOUNT_DOWN,
+// ACCOUNT_PAUSED, BATCH_COMPLETED, POSTS_FAILED, ...) so new kinds don't
+// need migrations. dedupeKey lets the backend avoid repeating the same
+// alert (e.g. one "paused" message per pause, not one per post).
+// instagramAccountId/postId/batchId are plain strings on purpose (no FK):
+// the notification must survive the account or post being deleted.
+model Notification {
+  id                 String    @id @default(uuid())
+  userId             String
+  user               User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type               String
+  severity           String    @default("info") // info | success | warning | error
+  title              String
+  message            String?   @db.Text
+  instagramAccountId String?
+  postId             String?
+  batchId            String?
+  dedupeKey          String?
+  readAt             DateTime?
+  createdAt          DateTime  @default(now())
+
+  @@index([userId, createdAt])
+  @@index([userId, readAt])
+  @@index([dedupeKey])
+  @@map("notifications")
 }

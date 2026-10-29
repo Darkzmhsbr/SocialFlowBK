@@ -5,6 +5,8 @@
 const prisma = require('../config/database');
 // Rodada 4.1: ids for bulk inserts (createMany doesn't return rows).
 const crypto = require('crypto');
+// Rodada 5: minimum gap between publishes on the same account (claim).
+const env = require('../config/env');
 
 // Always attached to reads so callers get { medias: [{ order, mediaAsset }] }.
 // Rodada 2b: also includes coverMediaAsset (optional custom cover art for
@@ -27,6 +29,10 @@ const POST_INCLUDE = {
       accessTokenEncrypted: true,
       tokenExpiresAt: true,
       status: true,
+      // Rodada 5: lets the UI explain why a scheduled post is waiting.
+      publishPausedUntil: true,
+      pauseReason: true,
+      lastErrorMessage: true,
     },
   },
 };
@@ -353,6 +359,18 @@ async function claimDuePostsFair(limit = 3) {
                 SELECT "instagramAccountId" FROM "scheduled_posts"
                 WHERE "status" IN ('QUEUED', 'PUBLISHING')
               )
+              -- Rodada 5: skip accounts that are down or paused (Meta limits)
+              AND "instagramAccountId" NOT IN (
+                SELECT "id" FROM "instagram_accounts"
+                WHERE "status" <> 'ACTIVE'
+                   OR ("publishPausedUntil" IS NOT NULL AND "publishPausedUntil" > NOW())
+              )
+              -- Rodada 5: minimum gap since the account's last publish
+              AND "instagramAccountId" NOT IN (
+                SELECT "instagramAccountId" FROM "scheduled_posts"
+                WHERE "status" = 'PUBLISHED'
+                  AND "publishedAt" > ${minGapCutoff()}
+              )
             ORDER BY "instagramAccountId", "scheduledFor" ASC
           ) c
         ) ranked ON ranked."id" = sp."id"
@@ -489,6 +507,59 @@ async function createBatchBulk(postsData) {
   return postRows;
 }
 
+// --- Rodada 5: pause / publish now ----------------------------------------
+
+// Cutoff for the minimum gap between two publishes on the same account.
+// With ACCOUNT_MIN_GAP_MINUTES=0 the cutoff is "now", which excludes nothing.
+function minGapCutoff() {
+  const minutes = Math.max(0, Number(env.worker.accountMinGapMinutes) || 0);
+  return new Date(Date.now() - minutes * 60 * 1000);
+}
+
+/**
+ * Put a post back in the queue after an ACCOUNT-level problem (Meta limit,
+ * account down). Keeps scheduledFor (preserves order) and retryCount (the
+ * attempt didn't count). The claim skips the account until it's usable.
+ */
+function deferPost(id) {
+  return prisma.scheduledPost.update({
+    where: { id },
+    data: { status: 'SCHEDULED' },
+    include: POST_INCLUDE,
+  });
+}
+
+// Statuses that "Publicar agora" accepts. The status filter in the WHERE
+// protects against a race with the worker claiming the post meanwhile.
+const REQUEUE_STATUSES = ['DRAFT', 'SCHEDULED', 'FAILED'];
+
+/**
+ * "Publicar agora": due immediately, fresh retry budget, old error cleared.
+ * Returns how many rows changed (0 = the worker took it in the meantime).
+ */
+async function requeueNow(id, at = new Date()) {
+  const { count } = await prisma.scheduledPost.updateMany({
+    where: { id, status: { in: REQUEUE_STATUSES } },
+    data: { status: 'SCHEDULED', scheduledFor: at, retryCount: 0, failureReason: null },
+  });
+  return count;
+}
+
+/**
+ * Batch version: [{ id, scheduledFor }] in one transaction.
+ */
+async function requeueMany(entries) {
+  const results = await prisma.$transaction(
+    entries.map((e) =>
+      prisma.scheduledPost.updateMany({
+        where: { id: e.id, status: { in: REQUEUE_STATUSES } },
+        data: { status: 'SCHEDULED', scheduledFor: e.scheduledFor, retryCount: 0, failureReason: null },
+      })
+    )
+  );
+  return results.reduce((sum, r) => sum + r.count, 0);
+}
+
 module.exports = {
   create,
   findById,
@@ -512,4 +583,8 @@ module.exports = {
   // Rodada 4.1
   findPageByUserId,
   createBatchBulk,
+  // Rodada 5
+  deferPost,
+  requeueNow,
+  requeueMany,
 };

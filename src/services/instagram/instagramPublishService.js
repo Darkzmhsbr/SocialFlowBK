@@ -24,6 +24,16 @@
 // failure) — Meta already downloaded the file when the container reached
 // FINISHED. If a copy fails, that media falls back to its original URL and
 // the publish goes on. Toggle with UNIQUE_MEDIA_URL_PER_ACCOUNT.
+//
+// Rodada 5 (Meta limits + account health):
+//   - Before publishing, the account's daily publish quota is checked
+//     (content_publishing_limit, cached ~15 min per account).
+//   - Rate limit / daily limit / action block -> the ACCOUNT is paused
+//     (publishPausedUntil) and the post goes back to SCHEDULED without
+//     spending a retry. It resumes automatically after the pause.
+//   - Account restricted/disabled/token invalid -> account marked ERROR /
+//     TOKEN_EXPIRED, post goes back to SCHEDULED and waits for reconnect.
+//   Both cases create a notification (accountHealthService).
 
 const instagramMediaService = require('./instagramMediaService');
 const instagramApiClient = require('../../integrations/instagram/instagramApiClient');
@@ -34,6 +44,8 @@ const { AppError, ErrorCodes } = require('../../utils/errors');
 const logger = require('../../utils/logger');
 // Rodada 4: temp copies for per-account unique URLs.
 const b2Client = require('../../integrations/backblaze/b2Client');
+// Rodada 5: Meta limits / account problems.
+const accountHealthService = require('./accountHealthService');
 
 // Backoff schedule for retries. Index = retryCount BEFORE the retry.
 // So a post that just failed for the first time (retryCount was 0, becomes
@@ -77,11 +89,15 @@ async function publishPost(post) {
     await scheduledPostRepository.markPublishing(post.id);
 
     const accessToken = decryptToken(post.instagramAccount.accessTokenEncrypted);
+    // Rodada 5: stop BEFORE Meta rejects the publish for the daily quota.
+    await assertPublishingQuota(post, accessToken);
     // Rodada 4: same post, but media/cover URLs swapped for temp copies.
     const publishView = await prepareUniqueMediaUrls(post, tempKeys);
     const mediaId = await publishByType(publishView, accessToken);
 
     const finalPost = await scheduledPostRepository.markPublished(post.id, mediaId);
+    // Rodada 5: keep the cached quota in sync without another Meta call.
+    notePublishedForQuota(post.instagramAccountId);
     logger.info('Post published', {
       postId: post.id,
       instagramMediaId: mediaId,
@@ -311,6 +327,28 @@ async function handlePublishFailure(post, error) {
     stack: error.stack,
   });
 
+  // Rodada 5: Meta limits and account problems are about the ACCOUNT, not
+  // this post. Pause/flag the account and put the post back in the queue
+  // without spending a retry — it resumes on its own.
+  const accountOutcome = await accountHealthService
+    .handleAccountError(post.instagramAccountId, error, { context: 'publish' })
+    .catch((err) => {
+      logger.warn('handleAccountError failed (falling back to normal retry rules)', {
+        postId: post.id,
+        error: err.message,
+      });
+      return { handled: false };
+    });
+  if (accountOutcome.handled) {
+    logger.warn('Post deferred because of an account-level problem', {
+      postId: post.id,
+      accountId: post.instagramAccountId,
+      kind: accountOutcome.kind,
+      resumeAt: accountOutcome.resumeAt,
+    });
+    return scheduledPostRepository.deferPost(post.id);
+  }
+
   const nonRetryableCodes = new Set([
     ErrorCodes.INSTAGRAM_MEDIA_ERROR,
     ErrorCodes.INSTAGRAM_AUTH_FAILED,
@@ -404,6 +442,54 @@ function cleanupTempMedia(tempKeys, postId) {
       logger.warn('Temp media cleanup failed', { postId, key, error: err.message });
     });
   }
+}
+
+// --- Rodada 5: daily publish quota ----------------------------------------
+
+// accountId -> { remaining, checkedAt }. In-memory on purpose: losing it on
+// restart only costs one extra Meta call per account.
+const quotaCache = new Map();
+const QUOTA_CACHE_MS = 15 * 60 * 1000;
+
+async function assertPublishingQuota(post, accessToken) {
+  if (!env.worker.checkPublishingLimit) return;
+
+  const key = post.instagramAccountId;
+  const cached = quotaCache.get(key);
+  if (cached && Date.now() - cached.checkedAt < QUOTA_CACHE_MS && cached.remaining > 1) return;
+
+  let quota;
+  try {
+    quota = await instagramApiClient.fetchContentPublishingLimit(
+      post.instagramAccount.instagramUserId,
+      accessToken
+    );
+  } catch (err) {
+    // Limits / account problems must bubble up (they pause or flag the
+    // account). Anything else: the check is best-effort, publish anyway.
+    const { kind } = accountHealthService.classifyMetaError(err, { context: 'publish' });
+    if (kind !== 'OTHER') throw err;
+    logger.warn('Publishing quota check failed, publishing anyway', { postId: post.id, error: err.message });
+    return;
+  }
+
+  if (quota.quotaUsage === null || quota.quotaTotal === null) return;
+  const remaining = quota.quotaTotal - quota.quotaUsage;
+  quotaCache.set(key, { remaining, checkedAt: Date.now() });
+
+  if (remaining <= 0) {
+    throw new AppError(
+      ErrorCodes.INSTAGRAM_PUBLISH_LIMIT_REACHED,
+      `Limite diário de publicações do Instagram atingido (${quota.quotaUsage}/${quota.quotaTotal} nas últimas 24h).`,
+      429,
+      { quotaUsage: quota.quotaUsage, quotaTotal: quota.quotaTotal }
+    );
+  }
+}
+
+function notePublishedForQuota(accountId) {
+  const cached = quotaCache.get(accountId);
+  if (cached) cached.remaining -= 1;
 }
 
 module.exports = { publishPost };

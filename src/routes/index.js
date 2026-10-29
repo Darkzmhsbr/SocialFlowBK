@@ -7,6 +7,8 @@ const postsRoutes = require('./postsRoutes');
 const dashboardRoutes = require('./dashboardRoutes');
 const authRoutes = require('./authRoutes');
 const invitesRoutes = require('./invitesRoutes');
+// Rodada 5
+const notificationsRoutes = require('./notificationsRoutes');
 
 const router = Router();
 
@@ -18,5 +20,6 @@ router.use('/posts', postsRoutes); // -> /api/posts/*
 router.use('/dashboard', dashboardRoutes); // -> /api/dashboard/*
 router.use('/auth', authRoutes); // -> /api/auth/*
 router.use('/invites', invitesRoutes); // -> /api/invites/*
+router.use('/notifications', notificationsRoutes); // -> /api/notifications/* (Rodada 5)
 
 module.exports = router;

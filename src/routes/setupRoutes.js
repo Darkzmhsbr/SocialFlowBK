@@ -359,4 +359,152 @@ async function inspectRodada4Schema() {
   };
 }
 
+// GET  /api/setup/migrate-rodada5-health?token=SEU_TOKEN   (pelo navegador)
+// POST /api/setup/migrate-rodada5-health?token=SEU_TOKEN   (curl/Postman)
+//
+// Rodada 5 (account health + notifications) schema migration:
+//   - instagram_accounts: 6 nullable columns (publishPausedUntil,
+//     pauseReason, lastErrorCode, lastErrorMessage, lastErrorAt,
+//     lastHealthCheckAt)
+//   - notifications: new table + FK to users (ON DELETE CASCADE) + 3 indexes
+// Names match what Prisma generates for schema.prisma, so a future
+// `prisma db push` sees no drift.
+//
+// Run it RIGHT AFTER the backend deploy goes Active (until then, account
+// queries fail because the new Prisma client expects the new columns).
+// Idempotent (IF NOT EXISTS everywhere) and transactional. Existing rows
+// only gain NULLs — nothing is deleted or rewritten.
+const RODADA5_ACCOUNT_COLUMNS = [
+  'publishPausedUntil',
+  'pauseReason',
+  'lastErrorCode',
+  'lastErrorMessage',
+  'lastErrorAt',
+  'lastHealthCheckAt',
+];
+const RODADA5_INDEXES = [
+  'notifications_userId_createdAt_idx',
+  'notifications_userId_readAt_idx',
+  'notifications_dedupeKey_idx',
+];
+
+async function migrateRodada5Health(req, res) {
+  if (!assertSetupToken(req, res)) return;
+
+  try {
+    const before = await inspectRodada5Schema();
+    if (before.missingColumns.length === 0 && before.tableExists && before.missingIndexes.length === 0) {
+      return res.json({
+        success: true,
+        data: {
+          applied: { columnsAdded: [], tableCreated: false, indexesCreated: [] },
+          schema: before,
+          message: 'Nada a migrar. Colunas, tabela de notificações e índices já existem.',
+        },
+      });
+    }
+
+    await prisma.$transaction([
+      prisma.$executeRawUnsafe(
+        'ALTER TABLE "instagram_accounts" ' +
+          'ADD COLUMN IF NOT EXISTS "publishPausedUntil" TIMESTAMP(3), ' +
+          'ADD COLUMN IF NOT EXISTS "pauseReason" TEXT, ' +
+          'ADD COLUMN IF NOT EXISTS "lastErrorCode" TEXT, ' +
+          'ADD COLUMN IF NOT EXISTS "lastErrorMessage" TEXT, ' +
+          'ADD COLUMN IF NOT EXISTS "lastErrorAt" TIMESTAMP(3), ' +
+          'ADD COLUMN IF NOT EXISTS "lastHealthCheckAt" TIMESTAMP(3)'
+      ),
+      prisma.$executeRawUnsafe(
+        'CREATE TABLE IF NOT EXISTS "notifications" (' +
+          '"id" TEXT NOT NULL, ' +
+          '"userId" TEXT NOT NULL, ' +
+          '"type" TEXT NOT NULL, ' +
+          '"severity" TEXT NOT NULL DEFAULT \'info\', ' +
+          '"title" TEXT NOT NULL, ' +
+          '"message" TEXT, ' +
+          '"instagramAccountId" TEXT, ' +
+          '"postId" TEXT, ' +
+          '"batchId" TEXT, ' +
+          '"dedupeKey" TEXT, ' +
+          '"readAt" TIMESTAMP(3), ' +
+          '"createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP, ' +
+          'CONSTRAINT "notifications_pkey" PRIMARY KEY ("id"), ' +
+          'CONSTRAINT "notifications_userId_fkey" FOREIGN KEY ("userId") ' +
+          'REFERENCES "users"("id") ON DELETE CASCADE ON UPDATE CASCADE' +
+          ')'
+      ),
+      prisma.$executeRawUnsafe(
+        'CREATE INDEX IF NOT EXISTS "notifications_userId_createdAt_idx" ON "notifications"("userId", "createdAt")'
+      ),
+      prisma.$executeRawUnsafe(
+        'CREATE INDEX IF NOT EXISTS "notifications_userId_readAt_idx" ON "notifications"("userId", "readAt")'
+      ),
+      prisma.$executeRawUnsafe(
+        'CREATE INDEX IF NOT EXISTS "notifications_dedupeKey_idx" ON "notifications"("dedupeKey")'
+      ),
+    ]);
+
+    const after = await inspectRodada5Schema();
+    const applied = {
+      columnsAdded: before.missingColumns.filter((c) => !after.missingColumns.includes(c)),
+      tableCreated: !before.tableExists && after.tableExists,
+      indexesCreated: before.missingIndexes.filter((i) => !after.missingIndexes.includes(i)),
+    };
+
+    logger.info('Rodada 5 health migration applied', { applied, schema: after });
+
+    return res.json({
+      success: true,
+      data: {
+        applied,
+        schema: after,
+        message:
+          'Migração Rodada 5 concluída. Pausa automática, saúde dos perfis e notificações liberadas - pode publicar o frontend.',
+      },
+    });
+  } catch (error) {
+    logger.error('Failed to apply Rodada 5 health migration', {
+      message: error.message,
+      code: error.code,
+      meta: error.meta,
+    });
+    return res.status(500).json({
+      success: false,
+      error: {
+        code: error.code || 'PRISMA_ERROR',
+        message: error.message,
+        details: error.meta || null,
+      },
+    });
+  }
+}
+
+router.get('/migrate-rodada5-health', migrateRodada5Health);
+router.post('/migrate-rodada5-health', migrateRodada5Health);
+
+async function inspectRodada5Schema() {
+  const columns = await prisma.$queryRaw`
+    SELECT column_name FROM information_schema.columns
+    WHERE table_schema = current_schema()
+      AND table_name = 'instagram_accounts'
+  `;
+  const present = new Set(columns.map((c) => c.column_name));
+  const [table] = await prisma.$queryRaw`
+    SELECT EXISTS (
+      SELECT 1 FROM information_schema.tables
+      WHERE table_schema = current_schema() AND table_name = 'notifications'
+    ) AS "exists"
+  `;
+  const indexes = await prisma.$queryRaw`
+    SELECT indexname FROM pg_indexes
+    WHERE schemaname = current_schema() AND tablename = 'notifications'
+  `;
+  const presentIndexes = new Set(indexes.map((i) => i.indexname));
+  return {
+    missingColumns: RODADA5_ACCOUNT_COLUMNS.filter((c) => !present.has(c)),
+    tableExists: Boolean(table?.exists),
+    missingIndexes: RODADA5_INDEXES.filter((i) => !presentIndexes.has(i)),
+  };
+}
+
 module.exports = router;

@@ -22,12 +22,19 @@
 //      the next tick — free slots are refilled every interval.
 // WORKER_CONCURRENCY=1 keeps the original sequential tick() untouched.
 // waitForIdle() lets server.js wait for in-flight publishes on shutdown.
+//
+// Rodada 5: after every publish attempt, notificationService.onPostSettled
+// creates "posts failed" / "batch finished" alerts; start() also starts the
+// periodic account health check (accountHealthService).
 
 const cron = require('node-cron');
 const scheduledPostRepository = require('../database/scheduledPostRepository');
 const publishService = require('../services/instagram/instagramPublishService');
 const env = require('../config/env');
 const logger = require('../utils/logger');
+// Rodada 5: notifications + account health check.
+const notificationService = require('../services/notifications/notificationService');
+const accountHealthService = require('../services/instagram/accountHealthService');
 
 let isTicking = false;
 let task = null;
@@ -54,6 +61,8 @@ async function tick() {
       // publishPost swallows its own errors and persists them - so we can
       // safely await in a loop without a try/catch here.
       await publishService.publishPost(post);
+      // Rodada 5: never throws.
+      await notificationService.onPostSettled(post);
     }
 
     logger.info('Publish worker tick done', {
@@ -101,6 +110,8 @@ async function tickConcurrent() {
       // catch is defense in depth so one rejection can't leak a slot.
       const job = publishService
         .publishPost(post)
+        // Rodada 5: alerts for failures / finished batches (never throws).
+        .then(() => notificationService.onPostSettled(post))
         .catch((error) => {
           logger.error('Publish job rejected unexpectedly', {
             postId: post.id,
@@ -190,6 +201,9 @@ function start() {
     mode: env.worker.concurrency > 1 ? 'concurrent' : 'sequential',
     concurrency: env.worker.concurrency,
   });
+
+  // Rodada 5: periodic account health check + token refresh.
+  accountHealthService.startHealthChecks();
 }
 
 function stop() {
@@ -198,6 +212,8 @@ function stop() {
     task = null;
     logger.info('Publish worker stopped');
   }
+  // Rodada 5
+  accountHealthService.stopHealthChecks();
 }
 
 module.exports = { start, stop, tick };

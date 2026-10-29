@@ -25,6 +25,15 @@ function upsertByInstagramUserId({
       tokenExpiresAt,
       status: 'ACTIVE',
       lastSyncAt: new Date(),
+      // Rodada 5: reconnecting clears any pause / error. Posts that were
+      // waiting in the queue resume automatically (spaced by the minimum
+      // gap between publishes).
+      publishPausedUntil: null,
+      pauseReason: null,
+      lastErrorCode: null,
+      lastErrorMessage: null,
+      lastErrorAt: null,
+      lastHealthCheckAt: new Date(),
     },
     create: {
       userId,
