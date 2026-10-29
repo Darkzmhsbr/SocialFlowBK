@@ -11,6 +11,17 @@
 //
 // A boolean `isTicking` guard prevents overlap if a tick runs longer than
 // the interval - the next scheduled tick just no-ops.
+//
+// Rodada 4 (multi-profile batch): new concurrent mode, used whenever
+// WORKER_CONCURRENCY > 1 (default 3). Each tick:
+//   1. Recovers stale QUEUED/PUBLISHING rows (process died mid-publish).
+//   2. Claims only as many posts as there are free slots, via
+//      claimDuePostsFair (max one in-flight post per Instagram account,
+//      round-robin between users).
+//   3. Starts each publish WITHOUT awaiting it, so a slow Reel never blocks
+//      the next tick — free slots are refilled every interval.
+// WORKER_CONCURRENCY=1 keeps the original sequential tick() untouched.
+// waitForIdle() lets server.js wait for in-flight publishes on shutdown.
 
 const cron = require('node-cron');
 const scheduledPostRepository = require('../database/scheduledPostRepository');
@@ -61,6 +72,92 @@ async function tick() {
   }
 }
 
+// --- Rodada 4: concurrent mode ---------------------------------------------
+
+const inFlight = new Set();
+let isClaiming = false;
+
+async function tickConcurrent() {
+  if (isClaiming) return;
+  isClaiming = true;
+
+  try {
+    await recoverStale();
+
+    const freeSlots = env.worker.concurrency - inFlight.size;
+    if (freeSlots <= 0) return;
+
+    const posts = await scheduledPostRepository.claimDuePostsFair(freeSlots);
+    if (posts.length === 0) return;
+
+    logger.info('Publish worker tick (concurrent)', {
+      claimed: posts.length,
+      inFlightBefore: inFlight.size,
+      concurrency: env.worker.concurrency,
+    });
+
+    for (const post of posts) {
+      // publishPost never throws (outcomes are persisted on the row); the
+      // catch is defense in depth so one rejection can't leak a slot.
+      const job = publishService
+        .publishPost(post)
+        .catch((error) => {
+          logger.error('Publish job rejected unexpectedly', {
+            postId: post.id,
+            message: error.message,
+            stack: error.stack,
+          });
+        })
+        .finally(() => {
+          inFlight.delete(job);
+        });
+      inFlight.add(job);
+    }
+  } catch (error) {
+    logger.error('Publish worker concurrent tick failed unexpectedly', {
+      message: error.message,
+      stack: error.stack,
+    });
+  } finally {
+    isClaiming = false;
+  }
+}
+
+async function recoverStale() {
+  const now = Date.now();
+  const staleMs = env.worker.staleMinutes * 60 * 1000;
+  // A carousel waits for children AND parent; copies add a little more.
+  // Never call a post "dead" before it could reasonably have finished.
+  const publishingStaleMs = Math.max(staleMs, env.worker.pollTimeoutMs * 3 + 5 * 60 * 1000);
+
+  const result = await scheduledPostRepository.recoverStalePosts({
+    queuedBefore: new Date(now - staleMs),
+    publishingBefore: new Date(now - publishingStaleMs),
+  });
+
+  if (result.requeued > 0 || result.failed > 0) {
+    logger.warn('Recovered stale posts', result);
+  }
+}
+
+/**
+ * Resolves once nothing is publishing (either mode) or the timeout hits.
+ * Returns true when idle. Used by server.js before process.exit().
+ */
+async function waitForIdle(timeoutMs = 20000) {
+  const deadline = Date.now() + timeoutMs;
+  while ((inFlight.size > 0 || isTicking || isClaiming) && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  const idle = inFlight.size === 0 && !isTicking && !isClaiming;
+  if (idle) {
+    logger.info('Publish worker idle');
+  } else {
+    logger.warn('Publish worker still busy at shutdown deadline', { inFlight: inFlight.size });
+  }
+  return idle;
+}
+
 function start() {
   if (!env.worker.enabled) {
     logger.info('Publish worker disabled by WORKER_ENABLED=false');
@@ -77,7 +174,10 @@ function start() {
   const seconds = Math.max(5, Math.min(59, env.worker.intervalSeconds));
   const pattern = `*/${seconds} * * * * *`;
 
-  task = cron.schedule(pattern, tick, {
+  // Rodada 4: concurrent mode by default; WORKER_CONCURRENCY=1 = original tick.
+  const handler = env.worker.concurrency > 1 ? tickConcurrent : tick;
+
+  task = cron.schedule(pattern, handler, {
     scheduled: true,
     timezone: 'UTC',
   });
@@ -86,6 +186,9 @@ function start() {
     intervalSeconds: seconds,
     batchSize: env.worker.batchSize,
     maxRetries: env.worker.maxRetries,
+    // Rodada 4
+    mode: env.worker.concurrency > 1 ? 'concurrent' : 'sequential',
+    concurrency: env.worker.concurrency,
   });
 }
 
@@ -98,3 +201,7 @@ function stop() {
 }
 
 module.exports = { start, stop, tick };
+
+// Rodada 4: appended so the original export line stays untouched.
+module.exports.tickConcurrent = tickConcurrent;
+module.exports.waitForIdle = waitForIdle;

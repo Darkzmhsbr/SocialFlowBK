@@ -26,11 +26,17 @@
 //     preview uses natural rendering. If we want them, add a probe step
 //     (sharp for images, ffprobe for videos) BEFORE this upload — that's
 //     a separate concern from storage.
+//
+// Rodada 4: copyToTempKey() makes a server-side copy of an existing object
+// under a temporary key (no download, no re-upload). The publish service
+// uses it so each Instagram account fetches the media from a different URL;
+// the copy is removed with deleteAsset() right after publishing.
 
 const {
   S3Client,
   PutObjectCommand,
   DeleteObjectCommand,
+  CopyObjectCommand, // Rodada 4: server-side copy for per-account temp URLs
 } = require('@aws-sdk/client-s3');
 const crypto = require('crypto');
 const path = require('path');
@@ -168,6 +174,61 @@ async function deleteAsset(storageKey, _resourceType) {
   }
 }
 
+/**
+ * Rodada 4: server-side copy of an existing object to a temporary key.
+ *
+ * The bytes never leave Backblaze (S3 CopyObject), so even a 100MB video
+ * is copied quickly. Content-Type and Cache-Control are preserved
+ * (MetadataDirective: COPY). The temp key lives under
+ * {rootFolder}/{userId}/tmp/ and always carries a random uuid, so two
+ * accounts publishing the same media at the same moment never collide.
+ *
+ * Throws AppError(UPLOAD_FAILED) on failure — the caller (publish service)
+ * catches it and falls back to the original URL, so a failed copy never
+ * blocks a publish.
+ *
+ * @param {string} sourceKey - storageKey of the original MediaAsset
+ * @param {object} opts
+ * @param {string} opts.userId
+ * @param {string} [opts.tag] - short label added to the key (e.g. post id prefix)
+ * @returns {Promise<{ storageKey: string, url: string }>}
+ */
+async function copyToTempKey(sourceKey, { userId, tag } = {}) {
+  const ext = path.extname(sourceKey || '').slice(1).toLowerCase() || 'bin';
+  const uuid = crypto.randomUUID().replace(/-/g, '');
+  const safeTag = String(tag || 'tmp').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 64) || 'tmp';
+  const key = `${env.backblaze.rootFolder}/${userId}/tmp/${safeTag}-${uuid}.${ext}`;
+
+  try {
+    await s3.send(
+      new CopyObjectCommand({
+        Bucket: env.backblaze.bucketName,
+        Key: key,
+        // CopySource is "<bucket>/<key>", URL-encoded. encodeURI keeps the
+        // "/" separators of our nested keys intact.
+        CopySource: `${env.backblaze.bucketName}/${encodeURI(sourceKey)}`,
+        MetadataDirective: 'COPY',
+      })
+    );
+  } catch (error) {
+    logger.warn('Backblaze temp copy failed', {
+      sourceKey,
+      key,
+      message: error.message,
+      code: error.Code || error.name,
+      httpStatus: error.$metadata?.httpStatusCode,
+    });
+    throw new AppError(
+      ErrorCodes.UPLOAD_FAILED,
+      'Não foi possível preparar a cópia temporária da mídia.',
+      502,
+      { backblaze: error.message }
+    );
+  }
+
+  return { storageKey: key, url: buildPublicUrl(key) };
+}
+
 // -----------------------------------------------------------------------
 // helpers
 // -----------------------------------------------------------------------
@@ -196,3 +257,6 @@ function buildPublicUrl(key) {
 }
 
 module.exports = { uploadBuffer, deleteAsset };
+
+// Rodada 4: appended so the original export line stays untouched.
+module.exports.copyToTempKey = copyToTempKey;

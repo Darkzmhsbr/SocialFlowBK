@@ -39,6 +39,7 @@ const POST_INCLUDE = {
  * @param {Date|null} data.scheduledFor
  * @param {Array<{ mediaAssetId: string, order: number }>} data.medias
  * @param {string|null} [data.coverMediaAssetId] - optional cover for VIDEO/REEL
+ * @param {string|null} [data.batchId] - Rodada 4: groups posts created by the batch composer
  */
 function create(data) {
   return prisma.scheduledPost.create({
@@ -50,6 +51,8 @@ function create(data) {
       status: data.status,
       scheduledFor: data.scheduledFor,
       coverMediaAssetId: data.coverMediaAssetId ?? null,
+      // Rodada 4: null for posts created by the single composer.
+      batchId: data.batchId ?? null,
       medias: {
         create: data.medias.map((m) => ({
           order: m.order,
@@ -262,6 +265,146 @@ function saveInsightsCache(postId, insightsData, updatedAt) {
   });
 }
 
+// --- Rodada 4: multi-profile batch posting ------------------------------
+
+/**
+ * Create every post of a batch atomically. Reuses create() (each call
+ * returns a lazy PrismaPromise), so all posts are inserted in ONE
+ * transaction: either the whole batch exists or none of it does.
+ *
+ * @param {Array<object>} postsData - same shape accepted by create()
+ */
+function createBatch(postsData) {
+  return prisma.$transaction(postsData.map((data) => create(data)));
+}
+
+/**
+ * Every post of a batch, scoped to its owner (never leaks another user's
+ * rows even if a batchId is guessed).
+ */
+function findAllByBatchId(batchId, userId) {
+  return prisma.scheduledPost.findMany({
+    where: { batchId, userId },
+    orderBy: [{ scheduledFor: 'asc' }, { createdAt: 'asc' }],
+    include: POST_INCLUDE,
+  });
+}
+
+/**
+ * Bulk delete. The status filter is a second safety net: a post the worker
+ * claimed between the service read and this call (QUEUED/PUBLISHING) is
+ * simply skipped instead of being deleted mid-publish.
+ */
+function deleteManyByIds(ids) {
+  return prisma.scheduledPost.deleteMany({
+    where: {
+      id: { in: ids },
+      status: { notIn: ['QUEUED', 'PUBLISHING'] },
+    },
+  });
+}
+
+/**
+ * Bulk archive with the same race protection as deleteManyByIds.
+ */
+function archiveManyByIds(ids) {
+  return prisma.scheduledPost.updateMany({
+    where: {
+      id: { in: ids },
+      status: { notIn: ['QUEUED', 'PUBLISHING', 'ARCHIVED'] },
+    },
+    data: { status: 'ARCHIVED' },
+  });
+}
+
+/**
+ * Fair claim used by the concurrent worker (Rodada 4). Same atomic
+ * UPDATE ... FOR UPDATE SKIP LOCKED pattern as claimDuePosts, plus:
+ *
+ *   1. At most ONE due post per Instagram account (DISTINCT ON), and
+ *      none at all for an account that already has a post QUEUED or
+ *      PUBLISHING. Two containers for the same account never run at
+ *      the same time.
+ *   2. Round-robin between users (ROW_NUMBER per userId). A user with a
+ *      300-post batch can't starve another user's single post.
+ *
+ * claimDuePosts above is kept untouched — the worker still uses it when
+ * WORKER_CONCURRENCY=1 (original sequential mode).
+ */
+async function claimDuePostsFair(limit = 3) {
+  return prisma.$transaction(async (tx) => {
+    const claimed = await tx.$queryRaw`
+      UPDATE "scheduled_posts"
+      SET "status" = 'QUEUED', "updatedAt" = NOW()
+      WHERE "id" IN (
+        SELECT sp."id"
+        FROM "scheduled_posts" sp
+        JOIN (
+          SELECT c."id",
+                 ROW_NUMBER() OVER (PARTITION BY c."userId" ORDER BY c."scheduledFor" ASC) AS user_rank
+          FROM (
+            SELECT DISTINCT ON ("instagramAccountId") "id", "userId", "scheduledFor"
+            FROM "scheduled_posts"
+            WHERE "status" = 'SCHEDULED'
+              AND "scheduledFor" <= NOW()
+              AND "instagramAccountId" NOT IN (
+                SELECT "instagramAccountId" FROM "scheduled_posts"
+                WHERE "status" IN ('QUEUED', 'PUBLISHING')
+              )
+            ORDER BY "instagramAccountId", "scheduledFor" ASC
+          ) c
+        ) ranked ON ranked."id" = sp."id"
+        WHERE sp."status" = 'SCHEDULED'
+        ORDER BY ranked.user_rank ASC, sp."scheduledFor" ASC
+        LIMIT ${limit}
+        FOR UPDATE OF sp SKIP LOCKED
+      )
+      RETURNING "id"
+    `;
+
+    const ids = claimed.map((row) => row.id);
+    if (ids.length === 0) return [];
+
+    return tx.scheduledPost.findMany({
+      where: { id: { in: ids } },
+      include: POST_INCLUDE,
+    });
+  });
+}
+
+/**
+ * Recover posts left behind by a process that died mid-publish.
+ *
+ *   - QUEUED older than `queuedBefore`: never reached Meta (the concurrent
+ *     worker flips to PUBLISHING immediately after claiming). Safe to put
+ *     back to SCHEDULED — the next tick republishes it.
+ *   - PUBLISHING older than `publishingBefore`: Meta MAY have published it
+ *     already. Re-publishing could duplicate the post on the profile, so
+ *     it becomes FAILED with an explicit message and the user decides.
+ *
+ * Before Rodada 4 these rows stayed stuck forever (and couldn't even be
+ * deleted, since QUEUED/PUBLISHING are undeletable).
+ *
+ * @returns {Promise<{ requeued: number, failed: number }>}
+ */
+async function recoverStalePosts({ queuedBefore, publishingBefore }) {
+  const [requeued, failed] = await prisma.$transaction([
+    prisma.scheduledPost.updateMany({
+      where: { status: 'QUEUED', updatedAt: { lt: queuedBefore } },
+      data: { status: 'SCHEDULED' },
+    }),
+    prisma.scheduledPost.updateMany({
+      where: { status: 'PUBLISHING', updatedAt: { lt: publishingBefore } },
+      data: {
+        status: 'FAILED',
+        failureReason:
+          'Publicação interrompida (o servidor reiniciou durante o envio). Verifique no perfil do Instagram se o post saiu antes de reagendar.',
+      },
+    }),
+  ]);
+  return { requeued: requeued.count, failed: failed.count };
+}
+
 module.exports = {
   create,
   findById,
@@ -275,4 +418,11 @@ module.exports = {
   markFailed,
   rescheduleForRetry,
   saveInsightsCache,
+  // Rodada 4
+  createBatch,
+  findAllByBatchId,
+  deleteManyByIds,
+  archiveManyByIds,
+  claimDuePostsFair,
+  recoverStalePosts,
 };

@@ -114,6 +114,34 @@ const env = {
     // hard cap so a stuck job doesn't hold a worker slot forever.
     pollTimeoutMs: Number(process.env.WORKER_POLL_TIMEOUT_MS) || 90 * 1000, // 90 s
     pollIntervalMs: Number(process.env.WORKER_POLL_INTERVAL_MS) || 3000, // 3 s
+    // Rodada 4 - how many posts publish AT THE SAME TIME. The fair claim
+    // in scheduledPostRepository guarantees at most one in-flight post per
+    // Instagram account, so parallelism only happens across different
+    // accounts. Set WORKER_CONCURRENCY=1 to fall back to the original
+    // sequential tick (rollback lever — no code change needed).
+    concurrency: Math.max(1, Number(process.env.WORKER_CONCURRENCY) || 3),
+    // Rodada 4 - posts stuck in QUEUED / PUBLISHING longer than this are
+    // recovered (process died mid-publish: deploy, crash, OOM). PUBLISHING
+    // uses max(this, 3x pollTimeout + 5min) so a slow carousel is never
+    // mistaken for a dead one.
+    staleMinutes: Number(process.env.WORKER_STALE_MINUTES) || 15,
+    // Rodada 4 - before each publish, copy the media to a temporary
+    // Backblaze key so every account receives a different URL. The copy
+    // is deleted right after publishing. Set to false to always send the
+    // original URL.
+    uniqueMediaUrlPerAccount: bool('UNIQUE_MEDIA_URL_PER_ACCOUNT', true),
+  },
+
+  // Rodada 4 - multi-profile batch composer limits and stagger defaults.
+  // One batch = N media items x M accounts posts.
+  batch: {
+    maxItems: Number(process.env.BATCH_MAX_ITEMS) || 20,
+    maxAccounts: Number(process.env.BATCH_MAX_ACCOUNTS) || 30,
+    maxPosts: Number(process.env.BATCH_MAX_POSTS) || 300,
+    // Window (minutes) over which the accounts of ONE item are spread.
+    defaultWindowMinutes: Number(process.env.BATCH_DEFAULT_WINDOW_MINUTES) || 30,
+    // Gap (minutes) between consecutive items on the SAME account.
+    defaultItemIntervalMinutes: Number(process.env.BATCH_DEFAULT_ITEM_INTERVAL_MINUTES) || 30,
   },
 
   // Phase 3.1 - authentication. jwtSecret should be a long random string;

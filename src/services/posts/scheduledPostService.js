@@ -5,6 +5,12 @@
 // This file does NOT talk to Instagram. Publishing lives in Phase 2.2
 // (see instagramPublishService.js placeholder). All this file does is
 // validate + persist + expose posts in editable states.
+//
+// Rodada 4: createBatch() turns N media items x M Instagram accounts into
+// N*M independent posts sharing a batchId. Each post is a normal row —
+// worker, metrics, edit and delete keep working unchanged. Staggering is
+// just a different scheduledFor per post, and spintax captions are
+// resolved here, so every post already stores its final caption.
 
 const postRepository = require('../../database/scheduledPostRepository');
 const mediaRepository = require('../../database/mediaRepository');
@@ -12,6 +18,9 @@ const accountRepository = require('../../database/instagramAccountRepository');
 const mediaService = require('../media/mediaService');
 const { AppError, ErrorCodes } = require('../../utils/errors');
 const logger = require('../../utils/logger');
+// Rodada 4: batch ids + limits/stagger defaults.
+const crypto = require('crypto');
+const env = require('../../config/env');
 
 // Which post types accept how many media items, and which media types
 // are valid for each. Enforced on both create and update.
@@ -478,6 +487,8 @@ function toPublicShape(post) {
     failureReason: post.failureReason,
     retryCount: post.retryCount,
     instagramMediaId: post.instagramMediaId,
+    // Rodada 4: null for single posts; same uuid for every post of a batch.
+    batchId: post.batchId ?? null,
     instagramAccount: post.instagramAccount,
     medias: (post.medias || []).map((pm) => ({
       order: pm.order,
@@ -502,6 +513,357 @@ function toPublicShape(post) {
   };
 }
 
+// -----------------------------------------------------------------------
+// Rodada 4: multi-profile batch posting
+// -----------------------------------------------------------------------
+
+// Instagram's caption ceiling (mirrors CAPTION_MAX_LENGTH on the frontend).
+// Checked after spintax resolution, since a resolved caption can be longer
+// or shorter than its template.
+const BATCH_CAPTION_MAX_LENGTH = 2200;
+
+/**
+ * Create a batch: every item is published on every selected account.
+ *
+ * @param {object} args
+ * @param {string} args.userId
+ * @param {Array<string>} args.instagramAccountIds - target accounts (ACTIVE, owned by user)
+ * @param {string} args.type - same type for every item
+ * @param {Array<{ mediaIds: string[], caption?: string, coverMediaAssetId?: string|null }>} args.items
+ *        One item = one post per account. For single-media types each item
+ *        has one media; a carousel item has 2-10. Item caption/cover
+ *        override the shared ones (cover: null explicitly = no cover).
+ * @param {string} [args.caption] - shared caption (spintax allowed)
+ * @param {string|null} [args.coverMediaAssetId] - shared cover (FEED_VIDEO/REEL)
+ * @param {string|Date} [args.scheduledFor] - base date; omit to save all as DRAFT
+ * @param {{ enabled?: boolean, windowMinutes?: number, itemIntervalMinutes?: number }} [args.stagger]
+ * @param {boolean} [args.useSpintax=true] - resolve {a|b|c} per post
+ * @returns {Promise<{ batchId: string, posts: ScheduledPost[] }>}
+ */
+async function createBatch({
+  userId,
+  instagramAccountIds,
+  type,
+  items,
+  caption,
+  coverMediaAssetId,
+  scheduledFor,
+  stagger,
+  useSpintax = true,
+}) {
+  assertValidType(type);
+  const limits = env.batch;
+
+  // --- accounts ----------------------------------------------------------
+  if (!Array.isArray(instagramAccountIds) || instagramAccountIds.length === 0) {
+    throw new AppError(ErrorCodes.VALIDATION_ERROR, 'Selecione pelo menos um perfil.', 400);
+  }
+  const accountIds = [...new Set(instagramAccountIds.filter(Boolean).map(String))];
+  if (accountIds.length === 0) {
+    throw new AppError(ErrorCodes.VALIDATION_ERROR, 'Selecione pelo menos um perfil.', 400);
+  }
+  if (accountIds.length > limits.maxAccounts) {
+    throw new AppError(
+      ErrorCodes.BATCH_LIMIT_EXCEEDED,
+      `Máximo de ${limits.maxAccounts} perfis por lote. Selecionados: ${accountIds.length}.`,
+      400
+    );
+  }
+  for (const accountId of accountIds) {
+    const account = await assertAccountBelongsToUser({ instagramAccountId: accountId, userId });
+    if (account.status !== 'ACTIVE') {
+      throw new AppError(
+        ErrorCodes.INSTAGRAM_ACCOUNT_INACTIVE,
+        `A conta @${account.username} não está ativa (status: ${account.status}). Reconecte-a ou remova da seleção.`,
+        409
+      );
+    }
+  }
+
+  // --- items -------------------------------------------------------------
+  if (!Array.isArray(items) || items.length === 0) {
+    throw new AppError(ErrorCodes.INVALID_MEDIA_COUNT, 'Envie pelo menos uma mídia para o lote.', 400);
+  }
+  if (items.length > limits.maxItems) {
+    throw new AppError(
+      ErrorCodes.BATCH_LIMIT_EXCEEDED,
+      `Máximo de ${limits.maxItems} mídias por lote. Recebido: ${items.length}.`,
+      400
+    );
+  }
+  const totalPosts = items.length * accountIds.length;
+  if (totalPosts > limits.maxPosts) {
+    throw new AppError(
+      ErrorCodes.BATCH_LIMIT_EXCEEDED,
+      `Este lote geraria ${totalPosts} posts (máximo ${limits.maxPosts}). Reduza mídias ou perfis.`,
+      400
+    );
+  }
+
+  const sharedCoverId = await resolveAndValidateCover({ userId, type, coverMediaAssetId });
+
+  const resolvedItems = [];
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i] || {};
+    try {
+      const medias = await resolveAndValidateMedias({ userId, type, mediaIds: item.mediaIds });
+      const itemCoverId =
+        item.coverMediaAssetId !== undefined
+          ? await resolveAndValidateCover({ userId, type, coverMediaAssetId: item.coverMediaAssetId })
+          : sharedCoverId;
+      const captionTemplate =
+        typeof item.caption === 'string' && item.caption.trim() !== '' ? item.caption : caption ?? null;
+      resolvedItems.push({ medias, coverMediaAssetId: itemCoverId, captionTemplate });
+    } catch (err) {
+      // Prefix the item number so the user knows which upload to fix.
+      if (err instanceof AppError) {
+        throw new AppError(err.code, `Mídia ${i + 1}: ${err.message}`, err.status, err.debug);
+      }
+      throw err;
+    }
+  }
+
+  // --- schedule ----------------------------------------------------------
+  const baseDate = normalizeScheduledFor(scheduledFor);
+  const status = baseDate ? 'SCHEDULED' : 'DRAFT';
+  const staggerConfig = normalizeStagger(stagger);
+  const plan = buildStaggerPlan({
+    itemCount: resolvedItems.length,
+    accountIds,
+    baseDate,
+    stagger: staggerConfig,
+  });
+
+  // --- build rows --------------------------------------------------------
+  const batchId = crypto.randomUUID();
+  const postsData = [];
+  plan.forEach((entries, itemIndex) => {
+    const item = resolvedItems[itemIndex];
+    for (const entry of entries) {
+      const finalCaption =
+        item.captionTemplate && useSpintax !== false
+          ? resolveSpintax(item.captionTemplate)
+          : item.captionTemplate;
+      if (finalCaption && finalCaption.length > BATCH_CAPTION_MAX_LENGTH) {
+        throw new AppError(
+          ErrorCodes.VALIDATION_ERROR,
+          `Mídia ${itemIndex + 1}: a legenda passa de ${BATCH_CAPTION_MAX_LENGTH} caracteres.`,
+          400
+        );
+      }
+      postsData.push({
+        userId,
+        instagramAccountId: entry.accountId,
+        type,
+        caption: finalCaption ?? null,
+        status,
+        scheduledFor: entry.scheduledFor,
+        medias: item.medias,
+        coverMediaAssetId: item.coverMediaAssetId,
+        batchId,
+      });
+    }
+  });
+
+  const posts = await postRepository.createBatch(postsData);
+
+  logger.info('Scheduled post batch created', {
+    userId,
+    batchId,
+    type,
+    items: resolvedItems.length,
+    accounts: accountIds.length,
+    posts: posts.length,
+    status,
+    stagger: staggerConfig,
+  });
+
+  return { batchId, posts };
+}
+
+async function getBatch(batchId, userId) {
+  const posts = await postRepository.findAllByBatchId(batchId, userId);
+  if (!posts || posts.length === 0) {
+    throw new AppError(ErrorCodes.BATCH_NOT_FOUND, 'Lote não encontrado.', 404);
+  }
+  return posts;
+}
+
+/**
+ * Delete every post of the batch that is not QUEUED/PUBLISHING. Unlike
+ * calling deletePost N times, the orphan check runs ONCE per media after
+ * all rows are gone (no concurrent checks racing on the same file).
+ * Same Instagram caveat as deletePost: PUBLISHED posts stay on the profile.
+ */
+async function deleteBatch(batchId, userId) {
+  const posts = await getBatch(batchId, userId);
+  const deletable = posts.filter((p) => !UNDELETABLE_STATUSES.has(p.status));
+
+  if (deletable.length === 0) {
+    throw new AppError(
+      ErrorCodes.POST_INVALID_STATE,
+      'Todos os posts restantes deste lote estão na fila ou em publicação. Aguarde alguns instantes e tente novamente.',
+      409
+    );
+  }
+
+  const mediaAssetIds = new Set();
+  for (const post of deletable) {
+    for (const pm of post.medias || []) {
+      const mediaId = pm.mediaAssetId ?? pm.mediaAsset?.id;
+      if (mediaId) mediaAssetIds.add(mediaId);
+    }
+    if (post.coverMediaAssetId) mediaAssetIds.add(post.coverMediaAssetId);
+  }
+
+  const { count } = await postRepository.deleteManyByIds(deletable.map((p) => p.id));
+
+  logger.info('Scheduled post batch deleted', {
+    userId,
+    batchId,
+    deleted: count,
+    skipped: posts.length - count,
+    mediaAssetCount: mediaAssetIds.size,
+  });
+
+  for (const mediaId of mediaAssetIds) {
+    mediaService.deleteIfOrphan(mediaId, userId).catch((err) => {
+      logger.warn('Orphan media cleanup rejected unexpectedly', {
+        mediaId,
+        userId,
+        error: err.message,
+      });
+    });
+  }
+
+  return { batchId, deleted: count, skipped: posts.length - count };
+}
+
+/**
+ * Archive every post of the batch that the worker isn't touching.
+ */
+async function archiveBatch(batchId, userId) {
+  const posts = await getBatch(batchId, userId);
+  const ids = posts
+    .filter((p) => !['QUEUED', 'PUBLISHING', 'ARCHIVED'].includes(p.status))
+    .map((p) => p.id);
+
+  if (ids.length === 0) {
+    return { batchId, archived: 0, skipped: posts.length };
+  }
+
+  const { count } = await postRepository.archiveManyByIds(ids);
+  logger.info('Scheduled post batch archived', { userId, batchId, archived: count });
+  return { batchId, archived: count, skipped: posts.length - count };
+}
+
+/**
+ * Compact summary for the UI: totals per status, accounts involved and
+ * the scheduling span.
+ */
+function summarizeBatch(batchId, posts) {
+  const byStatus = {};
+  const accountIds = new Set();
+  let firstScheduledFor = null;
+  let lastScheduledFor = null;
+
+  for (const post of posts || []) {
+    byStatus[post.status] = (byStatus[post.status] || 0) + 1;
+    accountIds.add(post.instagramAccountId);
+    if (post.scheduledFor) {
+      const date = new Date(post.scheduledFor);
+      if (!firstScheduledFor || date < firstScheduledFor) firstScheduledFor = date;
+      if (!lastScheduledFor || date > lastScheduledFor) lastScheduledFor = date;
+    }
+  }
+
+  return {
+    batchId,
+    total: (posts || []).length,
+    accounts: accountIds.size,
+    byStatus,
+    firstScheduledFor,
+    lastScheduledFor,
+  };
+}
+
+/**
+ * Resolve spintax: "{Oi|Olá|E aí}" -> one random option. Nested groups
+ * work ("{a|{b|c}}"), innermost first. Braces WITHOUT a "|" inside are
+ * left untouched, so a normal caption containing "{texto}" never changes.
+ */
+const SPINTAX_GROUP = /\{([^{}]*\|[^{}]*)\}/;
+function resolveSpintax(text) {
+  if (typeof text !== 'string' || !text.includes('|')) return text;
+  let out = text;
+  let guard = 0;
+  while (SPINTAX_GROUP.test(out) && guard < 500) {
+    out = out.replace(SPINTAX_GROUP, (_, group) => {
+      const options = group.split('|');
+      return options[Math.floor(Math.random() * options.length)];
+    });
+    guard += 1;
+  }
+  return out;
+}
+
+function normalizeStagger(stagger) {
+  const s = stagger || {};
+  return {
+    enabled: s.enabled !== undefined ? Boolean(s.enabled) : true,
+    windowMinutes: clampNumber(s.windowMinutes, 0, 720, env.batch.defaultWindowMinutes),
+    itemIntervalMinutes: clampNumber(s.itemIntervalMinutes, 0, 1440, env.batch.defaultItemIntervalMinutes),
+  };
+}
+
+function clampNumber(value, min, max, fallback) {
+  if (value === undefined || value === null || value === '') return fallback;
+  const n = Number(value);
+  if (Number.isNaN(n)) return fallback;
+  return Math.min(max, Math.max(min, n));
+}
+
+/**
+ * Returns plan[itemIndex] = [{ accountId, scheduledFor }].
+ *
+ * With stagger enabled:
+ *   - item i starts at base + i * itemIntervalMinutes
+ *   - the accounts of that item are spread over windowMinutes, one slot
+ *     each, with random jitter inside the slot
+ *   - account order is shuffled per item, so the same profile isn't
+ *     always the first one to post
+ * Disabled: every post at the base date. No base date: DRAFT (null).
+ */
+function buildStaggerPlan({ itemCount, accountIds, baseDate, stagger }) {
+  const plan = [];
+  const slotMs = accountIds.length > 0 ? (stagger.windowMinutes * 60 * 1000) / accountIds.length : 0;
+
+  for (let i = 0; i < itemCount; i++) {
+    const order = stagger.enabled ? shuffle(accountIds) : [...accountIds];
+    const itemOffsetMs = stagger.enabled ? i * stagger.itemIntervalMinutes * 60 * 1000 : 0;
+
+    plan.push(
+      order.map((accountId, k) => {
+        if (!baseDate) return { accountId, scheduledFor: null };
+        if (!stagger.enabled) return { accountId, scheduledFor: new Date(baseDate.getTime()) };
+        const jitterMs = Math.floor(Math.random() * slotMs * 0.8);
+        const ms = baseDate.getTime() + itemOffsetMs + Math.floor(k * slotMs) + jitterMs;
+        return { accountId, scheduledFor: new Date(Math.floor(ms / 1000) * 1000) };
+      })
+    );
+  }
+  return plan;
+}
+
+function shuffle(list) {
+  const arr = [...list];
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
+
 module.exports = {
   createPost,
   listPosts,
@@ -510,4 +872,11 @@ module.exports = {
   archivePost,
   deletePost,
   toPublicShape,
+  // Rodada 4
+  createBatch,
+  getBatch,
+  deleteBatch,
+  archiveBatch,
+  summarizeBatch,
+  resolveSpintax,
 };

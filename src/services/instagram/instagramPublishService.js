@@ -16,6 +16,14 @@
 // Not implemented (out of scope, tracked in roadmap):
 //   - Rodada 3:  post-publish metrics fetch (Insights API)
 //   - Rodada 4:  visual Story editor (canvas + text/stickers baked in)
+//
+// Rodada 4 (multi-profile batch): before publishing, every Backblaze media
+// of the post (including the cover) is copied server-side to a temporary
+// key, so each Instagram account fetches the file from a DIFFERENT URL.
+// The temp copies are deleted right after the publish attempt (success or
+// failure) — Meta already downloaded the file when the container reached
+// FINISHED. If a copy fails, that media falls back to its original URL and
+// the publish goes on. Toggle with UNIQUE_MEDIA_URL_PER_ACCOUNT.
 
 const instagramMediaService = require('./instagramMediaService');
 const instagramApiClient = require('../../integrations/instagram/instagramApiClient');
@@ -24,6 +32,8 @@ const { decryptToken } = require('../../utils/crypto');
 const env = require('../../config/env');
 const { AppError, ErrorCodes } = require('../../utils/errors');
 const logger = require('../../utils/logger');
+// Rodada 4: temp copies for per-account unique URLs.
+const b2Client = require('../../integrations/backblaze/b2Client');
 
 // Backoff schedule for retries. Index = retryCount BEFORE the retry.
 // So a post that just failed for the first time (retryCount was 0, becomes
@@ -45,6 +55,9 @@ async function publishPost(post) {
     retryCount: post.retryCount,
   });
 
+  // Rodada 4: temp object keys created for this attempt, removed in finally.
+  const tempKeys = [];
+
   try {
     if (!post.instagramAccount) {
       throw new AppError(
@@ -64,7 +77,9 @@ async function publishPost(post) {
     await scheduledPostRepository.markPublishing(post.id);
 
     const accessToken = decryptToken(post.instagramAccount.accessTokenEncrypted);
-    const mediaId = await publishByType(post, accessToken);
+    // Rodada 4: same post, but media/cover URLs swapped for temp copies.
+    const publishView = await prepareUniqueMediaUrls(post, tempKeys);
+    const mediaId = await publishByType(publishView, accessToken);
 
     const finalPost = await scheduledPostRepository.markPublished(post.id, mediaId);
     logger.info('Post published', {
@@ -74,6 +89,9 @@ async function publishPost(post) {
     return finalPost;
   } catch (error) {
     return handlePublishFailure(post, error);
+  } finally {
+    // Rodada 4: fire-and-forget — never delays or breaks the publish result.
+    cleanupTempMedia(tempKeys, post.id);
   }
 }
 
@@ -324,6 +342,68 @@ async function handlePublishFailure(post, error) {
   });
 
   return scheduledPostRepository.rescheduleForRetry(post.id, delayMs, message);
+}
+
+// --- Rodada 4: per-account unique media URLs ----------------------------
+
+/**
+ * Returns a shallow copy of `post` whose Backblaze media (and cover) point
+ * to freshly copied temp objects. Every created key is pushed into
+ * `tempKeysOut` so publishPost can clean them up. Legacy CLOUDINARY assets
+ * and any failed copy keep their original URL. The DB row is never touched.
+ */
+async function prepareUniqueMediaUrls(post, tempKeysOut) {
+  if (!env.worker.uniqueMediaUrlPerAccount) return post;
+
+  const assets = [
+    ...(post.medias || []).map((pm) => pm.mediaAsset),
+    post.coverMediaAsset,
+  ].filter(Boolean);
+
+  const urlByAssetId = new Map();
+  for (const asset of assets) {
+    if (urlByAssetId.has(asset.id)) continue;
+    if (asset.storageProvider !== 'BACKBLAZE' || !asset.storageKey) continue;
+    try {
+      const copy = await b2Client.copyToTempKey(asset.storageKey, {
+        userId: post.userId,
+        tag: String(post.id).slice(0, 8),
+      });
+      tempKeysOut.push(copy.storageKey);
+      urlByAssetId.set(asset.id, copy.url);
+    } catch (err) {
+      logger.warn('Unique media URL unavailable, using original URL', {
+        postId: post.id,
+        mediaId: asset.id,
+        error: err.message,
+      });
+    }
+  }
+
+  if (urlByAssetId.size === 0) return post;
+
+  const swap = (asset) =>
+    asset && urlByAssetId.has(asset.id) ? { ...asset, url: urlByAssetId.get(asset.id) } : asset;
+
+  logger.info('Publishing with unique media URLs', {
+    postId: post.id,
+    accountId: post.instagramAccountId,
+    copies: urlByAssetId.size,
+  });
+
+  return {
+    ...post,
+    medias: (post.medias || []).map((pm) => ({ ...pm, mediaAsset: swap(pm.mediaAsset) })),
+    coverMediaAsset: swap(post.coverMediaAsset),
+  };
+}
+
+function cleanupTempMedia(tempKeys, postId) {
+  for (const key of tempKeys) {
+    Promise.resolve(b2Client.deleteAsset(key, null)).catch((err) => {
+      logger.warn('Temp media cleanup failed', { postId, key, error: err.message });
+    });
+  }
 }
 
 module.exports = { publishPost };

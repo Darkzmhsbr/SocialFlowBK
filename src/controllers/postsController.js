@@ -91,4 +91,83 @@ const getPostInsights = async (req, res) => {
   return ok(res, result);
 };
 
+// --- Rodada 4: multi-profile batch posting ------------------------------
+
+// POST /api/posts/batch
+// Body:
+//   {
+//     instagramAccountIds: string[],          // target profiles (ACTIVE)
+//     type: "FEED_IMAGE" | "FEED_VIDEO" | "FEED_CAROUSEL" | "REEL" | "STORY",
+//     items: [                                // 1..20 — one post per account each
+//       { mediaIds: string[], caption?: string, coverMediaAssetId?: string|null }
+//     ],
+//     caption?: string,                       // shared caption, spintax {a|b} allowed
+//     coverMediaAssetId?: string,             // shared cover (FEED_VIDEO/REEL)
+//     scheduledFor?: string,                  // ISO base date; omit = all DRAFT
+//     stagger?: { enabled?: boolean, windowMinutes?: number, itemIntervalMinutes?: number },
+//     useSpintax?: boolean                    // default true
+//   }
+const createBatch = async (req, res) => {
+  const {
+    instagramAccountIds,
+    type,
+    items,
+    caption,
+    coverMediaAssetId,
+    scheduledFor,
+    stagger,
+    useSpintax,
+  } = req.body || {};
+
+  if (!Array.isArray(instagramAccountIds) || !type || !Array.isArray(items)) {
+    throw new AppError(
+      ErrorCodes.VALIDATION_ERROR,
+      'Campos obrigatórios: instagramAccountIds (lista), type, items (lista).',
+      400
+    );
+  }
+
+  const { batchId, posts } = await postService.createBatch({
+    userId: req.userId,
+    instagramAccountIds,
+    type,
+    items,
+    caption,
+    coverMediaAssetId,
+    scheduledFor,
+    stagger,
+    useSpintax,
+  });
+
+  return ok(res, { batch: postService.summarizeBatch(batchId, posts) });
+};
+
+// GET /api/posts/batch/:batchId
+const getBatch = async (req, res) => {
+  const posts = await postService.getBatch(req.params.batchId, req.userId);
+  return ok(res, {
+    batch: postService.summarizeBatch(req.params.batchId, posts),
+    posts: posts.map(postService.toPublicShape),
+  });
+};
+
+// POST /api/posts/batch/:batchId/archive
+const archiveBatch = async (req, res) => {
+  const result = await postService.archiveBatch(req.params.batchId, req.userId);
+  return ok(res, { archived: result });
+};
+
+// DELETE /api/posts/batch/:batchId
+// Skips QUEUED/PUBLISHING posts; PUBLISHED ones stay live on Instagram.
+const deleteBatch = async (req, res) => {
+  const result = await postService.deleteBatch(req.params.batchId, req.userId);
+  return ok(res, { deleted: result });
+};
+
 module.exports = { createPost, listPosts, getPost, updatePost, archivePost, deletePost, getPostInsights };
+
+// Rodada 4: appended so the original export line stays untouched.
+module.exports.createBatch = createBatch;
+module.exports.getBatch = getBatch;
+module.exports.archiveBatch = archiveBatch;
+module.exports.deleteBatch = deleteBatch;

@@ -253,4 +253,110 @@ router.post('/promote-default-user', async (req, res) => {
   }
 });
 
+// GET  /api/setup/migrate-rodada4-batch?token=SEU_TOKEN   (pelo navegador)
+// POST /api/setup/migrate-rodada4-batch?token=SEU_TOKEN   (curl/Postman)
+//
+// Rodada 4 (multi-profile batch posting) schema migration. Adds the
+// nullable column scheduled_posts."batchId" and its index — exactly what
+// schema.prisma now declares (@@index([batchId]) uses Prisma's default
+// name "scheduled_posts_batchId_idx", so a future `prisma db push` sees
+// no drift).
+//
+// Run it RIGHT AFTER the backend deploy goes Active: until it runs,
+// queries on scheduled_posts fail because the new Prisma client expects
+// the column.
+//
+// Idempotent - ADD COLUMN IF NOT EXISTS / CREATE INDEX IF NOT EXISTS, and
+// a re-run returns "nothing to migrate". Safe - both statements run inside
+// one transaction, existing rows only gain batchId = NULL, nothing is
+// deleted or rewritten.
+// Same handler on GET and POST so it can be run straight from the browser
+// address bar. Safe as GET because it is idempotent and token-protected.
+async function migrateRodada4Batch(req, res) {
+  if (!assertSetupToken(req, res)) return;
+
+  try {
+    const before = await inspectRodada4Schema();
+    if (before.columnExists && before.indexExists) {
+      return res.json({
+        success: true,
+        data: {
+          applied: { columnAdded: false, indexCreated: false },
+          schema: before,
+          message: 'Nada a migrar. A coluna batchId e o índice já existem.',
+        },
+      });
+    }
+
+    await prisma.$transaction([
+      prisma.$executeRawUnsafe(
+        'ALTER TABLE "scheduled_posts" ADD COLUMN IF NOT EXISTS "batchId" TEXT'
+      ),
+      prisma.$executeRawUnsafe(
+        'CREATE INDEX IF NOT EXISTS "scheduled_posts_batchId_idx" ON "scheduled_posts"("batchId")'
+      ),
+    ]);
+
+    const after = await inspectRodada4Schema();
+    const applied = {
+      columnAdded: !before.columnExists && after.columnExists,
+      indexCreated: !before.indexExists && after.indexExists,
+    };
+
+    logger.info('Rodada 4 batch migration applied', { applied, schema: after });
+
+    return res.json({
+      success: true,
+      data: {
+        applied,
+        schema: after,
+        message:
+          'Migração Rodada 4 concluída. Postagem em múltiplos perfis liberada - pode publicar o frontend.',
+      },
+    });
+  } catch (error) {
+    logger.error('Failed to apply Rodada 4 batch migration', {
+      message: error.message,
+      code: error.code,
+      meta: error.meta,
+    });
+    return res.status(500).json({
+      success: false,
+      error: {
+        code: error.code || 'PRISMA_ERROR',
+        message: error.message,
+        details: error.meta || null,
+      },
+    });
+  }
+}
+
+router.get('/migrate-rodada4-batch', migrateRodada4Batch);
+router.post('/migrate-rodada4-batch', migrateRodada4Batch);
+
+// Reads the live schema (information_schema / pg_indexes) instead of
+// trusting Prisma, so the response reports what actually exists in the DB.
+async function inspectRodada4Schema() {
+  const [column] = await prisma.$queryRaw`
+    SELECT EXISTS (
+      SELECT 1 FROM information_schema.columns
+      WHERE table_schema = current_schema()
+        AND table_name = 'scheduled_posts'
+        AND column_name = 'batchId'
+    ) AS "exists"
+  `;
+  const [index] = await prisma.$queryRaw`
+    SELECT EXISTS (
+      SELECT 1 FROM pg_indexes
+      WHERE schemaname = current_schema()
+        AND tablename = 'scheduled_posts'
+        AND indexname = 'scheduled_posts_batchId_idx'
+    ) AS "exists"
+  `;
+  return {
+    columnExists: Boolean(column?.exists),
+    indexExists: Boolean(index?.exists),
+  };
+}
+
 module.exports = router;
