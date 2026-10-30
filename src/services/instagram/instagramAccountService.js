@@ -40,9 +40,14 @@ function listAccounts(userId) {
   return accountRepository.findAllByUserId(userId);
 }
 
-async function getAccount(id) {
+// Rodada 14: optional userId — when given, the account must belong to that
+// user (same 404 as a missing account, so other users' ids are never revealed).
+async function getAccount(id, userId = null) {
   const account = await accountRepository.findById(id);
   if (!account) {
+    throw new AppError(ErrorCodes.NOT_FOUND, 'Conta não encontrada.', 404);
+  }
+  if (userId && account.userId !== userId) {
     throw new AppError(ErrorCodes.NOT_FOUND, 'Conta não encontrada.', 404);
   }
   return account;

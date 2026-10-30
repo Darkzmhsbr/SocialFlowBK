@@ -87,7 +87,8 @@ const listAccounts = async (req, res) => {
 
 // GET /api/instagram/accounts/:id  (requires auth)
 const getAccount = async (req, res) => {
-  const account = await accountService.getAccount(req.params.id);
+  // Rodada 14: only the owner can read the account.
+  const account = await accountService.getAccount(req.params.id, req.userId);
   return ok(res, { account: accountService.toPublicShape(account) });
 };
 
