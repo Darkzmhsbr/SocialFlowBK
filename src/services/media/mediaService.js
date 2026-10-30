@@ -153,6 +153,12 @@ async function deleteIfOrphan(mediaId, userId) {
       });
       return;
     }
+    // Rodada 7: media kept in the library is never auto-deleted — the user
+    // removes it explicitly in the Biblioteca page.
+    if (asset.inLibrary) {
+      logger.info('deleteIfOrphan: media kept in library, skipping', { mediaId });
+      return;
+    }
 
     const [postMediaCount, coverCount] = await Promise.all([
       prisma.postMedia.count({ where: { mediaAssetId: mediaId } }),
@@ -224,7 +230,172 @@ function toPublicShape(asset) {
     height: asset.height,
     durationSec: asset.durationSec,
     createdAt: asset.createdAt,
+    // Rodada 7: library info
+    inLibrary: Boolean(asset.inLibrary),
+    folderId: asset.folderId ?? null,
   };
 }
 
+// --- Rodada 7: media library ---------------------------------------------
+
+const FOLDER_NAME_MAX = 60;
+const LIBRARY_BULK_MAX = 500;
+
+function normalizeFolderName(name) {
+  const clean = String(name || '').replace(/\s+/g, ' ').trim();
+  if (!clean) {
+    throw new AppError(ErrorCodes.VALIDATION_ERROR, 'Dê um nome para a pasta.', 400);
+  }
+  if (clean.length > FOLDER_NAME_MAX) {
+    throw new AppError(ErrorCodes.VALIDATION_ERROR, `Nome da pasta: no máximo ${FOLDER_NAME_MAX} caracteres.`, 400);
+  }
+  return clean;
+}
+
+async function getOwnedFolder(folderId, userId) {
+  const folder = await mediaRepository.findFolderById(folderId);
+  if (!folder || folder.userId !== userId) {
+    throw new AppError(ErrorCodes.FOLDER_NOT_FOUND, 'Pasta não encontrada.', 404);
+  }
+  return folder;
+}
+
+function isUniqueViolation(err) {
+  return err && err.code === 'P2002';
+}
+
+async function listFolders(userId) {
+  const [folders, counts] = await Promise.all([
+    mediaRepository.findFoldersByUser(userId),
+    mediaRepository.getLibraryCounts(userId),
+  ]);
+  const previews = await mediaRepository.findFolderPreviews(
+    userId,
+    folders.map((f) => f.id)
+  );
+  return {
+    folders: folders.map((f) => ({
+      id: f.id,
+      name: f.name,
+      count: counts.perFolder[f.id] || 0,
+      preview: previews[f.id] || null,
+      createdAt: f.createdAt,
+    })),
+    counts: { all: counts.all, root: counts.root, unsaved: counts.unsaved },
+  };
+}
+
+async function createFolder(userId, name) {
+  const clean = normalizeFolderName(name);
+  try {
+    return await mediaRepository.createFolder(userId, clean);
+  } catch (err) {
+    if (isUniqueViolation(err)) {
+      throw new AppError(ErrorCodes.FOLDER_NAME_TAKEN, `Você já tem uma pasta chamada "${clean}".`, 409);
+    }
+    throw err;
+  }
+}
+
+async function renameFolder(folderId, userId, name) {
+  await getOwnedFolder(folderId, userId);
+  const clean = normalizeFolderName(name);
+  try {
+    return await mediaRepository.renameFolder(folderId, clean);
+  } catch (err) {
+    if (isUniqueViolation(err)) {
+      throw new AppError(ErrorCodes.FOLDER_NAME_TAKEN, `Você já tem uma pasta chamada "${clean}".`, 409);
+    }
+    throw err;
+  }
+}
+
+/**
+ * Delete a folder.
+ *   mode 'keep'   (default): its media stay in the library, "Sem pasta"
+ *   mode 'delete': its media are removed too (same rules as removeFromLibrary)
+ */
+async function deleteFolder(folderId, userId, { mode = 'keep' } = {}) {
+  await getOwnedFolder(folderId, userId);
+  let mediaResult = null;
+  if (mode === 'delete') {
+    const { items } = await mediaRepository.findLibraryPage(
+      userId,
+      { scope: 'folder', folderId },
+      { take: 5000, skip: 0 }
+    );
+    mediaResult = await removeFromLibrary(items.map((m) => m.id), userId);
+  }
+  await mediaRepository.deleteFolder(folderId);
+  logger.info('Media folder deleted', { userId, folderId, mode });
+  return { id: folderId, mode, media: mediaResult };
+}
+
+async function listLibrary(userId, { scope = 'all', folderId, type, take = 60, skip = 0 } = {}) {
+  if (scope === 'folder') await getOwnedFolder(folderId, userId);
+  const { items, total } = await mediaRepository.findLibraryPage(
+    userId,
+    { scope, folderId, type },
+    { take, skip }
+  );
+  return { items, total };
+}
+
+/**
+ * Keep media in the library (optionally inside a folder). Used by the
+ * Biblioteca upload, by "Guardar na biblioteca" and by the cover picker.
+ * folderId: undefined = don't touch, null = "Sem pasta", string = that folder.
+ */
+async function saveToLibrary(ids, userId, { folderId } = {}) {
+  const list = [...new Set((ids || []).map(String))].slice(0, LIBRARY_BULK_MAX);
+  if (list.length === 0) return { updated: 0 };
+  if (folderId) await getOwnedFolder(folderId, userId);
+  const data = { inLibrary: true };
+  if (folderId !== undefined) data.folderId = folderId || null;
+  const { count } = await mediaRepository.updateLibraryFields(list, userId, data);
+  return { updated: count };
+}
+
+/**
+ * Remove media from the library. A file still used by any post (any
+ * status) is NOT deleted — it just leaves the library, and the normal
+ * orphan cleanup deletes it once those posts are gone. Unused files are
+ * deleted from storage and from the DB right away.
+ */
+async function removeFromLibrary(ids, userId) {
+  const list = [...new Set((ids || []).map(String))].slice(0, LIBRARY_BULK_MAX);
+  const assets = await mediaRepository.findManyByIdsForUser(list, userId);
+  let deleted = 0;
+  let keptInUse = 0;
+
+  for (const asset of assets) {
+    const [postMediaCount, coverCount] = await Promise.all([
+      prisma.postMedia.count({ where: { mediaAssetId: asset.id } }),
+      prisma.scheduledPost.count({ where: { coverMediaAssetId: asset.id } }),
+    ]);
+    if (postMediaCount + coverCount > 0) {
+      await mediaRepository.updateLibraryFields([asset.id], userId, { inLibrary: false, folderId: null });
+      keptInUse += 1;
+      continue;
+    }
+    await deleteFromStorage(asset);
+    await mediaRepository.deleteById(asset.id);
+    deleted += 1;
+  }
+
+  logger.info('Library media removed', { userId, requested: list.length, deleted, keptInUse });
+  return { deleted, keptInUse };
+}
+
 module.exports = { uploadFile, listByUser, getById, deleteById, deleteIfOrphan, toPublicShape };
+
+// Rodada 7: appended so the original export line stays untouched.
+Object.assign(module.exports, {
+  listFolders,
+  createFolder,
+  renameFolder,
+  deleteFolder,
+  listLibrary,
+  saveToLibrary,
+  removeFromLibrary,
+});

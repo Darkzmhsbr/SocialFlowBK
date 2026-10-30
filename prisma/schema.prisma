@@ -52,6 +52,14 @@
 //   - Notification: messages shown in the header bell (account down,
 //     account paused, batch finished, posts failed).
 //   Applied via POST|GET /api/setup/migrate-rodada5-health (idempotent SQL).
+//
+// Rodada 7 additions (media library):
+//   - MediaFolder: user-created folders for the library ("Memes", ...).
+//   - MediaAsset.inLibrary: media the user chose to KEEP. The automatic
+//     orphan cleanup (after a post is deleted) never touches these.
+//   - MediaAsset.folderId: one folder per media (null = "Sem pasta").
+//     Deleting a folder sets it to null (media stays in the library).
+//   Applied via POST|GET /api/setup/migrate-rodada7-library (idempotent SQL).
 
 generator client {
   provider = "prisma-client-js"
@@ -83,6 +91,9 @@ model User {
 
   // Rodada 5: header notifications
   notifications  Notification[]
+
+  // Rodada 7: media library folders
+  mediaFolders   MediaFolder[]
 
   @@map("users")
 }
@@ -167,6 +178,11 @@ model MediaAsset {
   height             Int?
   durationSec        Float?              // only set for VIDEO
 
+  // Rodada 7: media library.
+  inLibrary          Boolean      @default(false)
+  folderId           String?
+  folder             MediaFolder? @relation(fields: [folderId], references: [id], onDelete: SetNull)
+
   createdAt          DateTime  @default(now())
 
   postMedias         PostMedia[]
@@ -175,6 +191,7 @@ model MediaAsset {
   postCovers         ScheduledPost[]
 
   @@index([userId])
+  @@index([folderId])
   @@map("media_assets")
 }
 
@@ -315,4 +332,21 @@ model Notification {
   @@index([userId, readAt])
   @@index([dedupeKey])
   @@map("notifications")
+}
+
+// --- Rodada 7: media library folders ---------------------------------------
+
+model MediaFolder {
+  id        String       @id @default(uuid())
+  userId    String
+  user      User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name      String
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+
+  medias    MediaAsset[]
+
+  @@unique([userId, name])
+  @@index([userId])
+  @@map("media_folders")
 }

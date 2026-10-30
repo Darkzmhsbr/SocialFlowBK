@@ -482,6 +482,154 @@ async function migrateRodada5Health(req, res) {
 router.get('/migrate-rodada5-health', migrateRodada5Health);
 router.post('/migrate-rodada5-health', migrateRodada5Health);
 
+// GET  /api/setup/migrate-rodada7-library?token=SEU_TOKEN   (pelo navegador)
+// POST /api/setup/migrate-rodada7-library?token=SEU_TOKEN   (curl/Postman)
+//
+// Rodada 7 (media library) schema migration:
+//   - media_folders: new table + FK to users (ON DELETE CASCADE),
+//     unique (userId, name) + index (userId)
+//   - media_assets: "inLibrary" BOOLEAN NOT NULL DEFAULT false, "folderId"
+//     TEXT + FK to media_folders (ON DELETE SET NULL) + index
+//   - first run only: every existing IMAGE goes to the library (inLibrary =
+//     true). Those are the covers already uploaded — they become visible in
+//     the cover picker and are protected from the automatic cleanup.
+// Names match what Prisma generates for schema.prisma (no drift).
+// Run RIGHT AFTER the backend deploy goes Active. Idempotent, transactional,
+// nothing is deleted.
+const RODADA7_INDEXES = ['media_folders_userId_name_key', 'media_folders_userId_idx', 'media_assets_folderId_idx'];
+
+async function migrateRodada7Library(req, res) {
+  if (!assertSetupToken(req, res)) return;
+
+  try {
+    const before = await inspectRodada7Schema();
+    const nothingMissing =
+      before.foldersTableExists &&
+      before.missingColumns.length === 0 &&
+      before.folderFkExists &&
+      before.missingIndexes.length === 0;
+
+    if (nothingMissing) {
+      return res.json({
+        success: true,
+        data: {
+          applied: { tableCreated: false, columnsAdded: [], foreignKeyCreated: false, indexesCreated: [], imagesMovedToLibrary: 0 },
+          schema: before,
+          message: 'Nada a migrar. Biblioteca e pastas já existem.',
+        },
+      });
+    }
+
+    const firstRun = before.missingColumns.includes('inLibrary');
+
+    const results = await prisma.$transaction([
+      prisma.$executeRawUnsafe(
+        'CREATE TABLE IF NOT EXISTS "media_folders" (' +
+          '"id" TEXT NOT NULL, ' +
+          '"userId" TEXT NOT NULL, ' +
+          '"name" TEXT NOT NULL, ' +
+          '"createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP, ' +
+          '"updatedAt" TIMESTAMP(3) NOT NULL, ' +
+          'CONSTRAINT "media_folders_pkey" PRIMARY KEY ("id"), ' +
+          'CONSTRAINT "media_folders_userId_fkey" FOREIGN KEY ("userId") ' +
+          'REFERENCES "users"("id") ON DELETE CASCADE ON UPDATE CASCADE' +
+          ')'
+      ),
+      prisma.$executeRawUnsafe(
+        'CREATE UNIQUE INDEX IF NOT EXISTS "media_folders_userId_name_key" ON "media_folders"("userId", "name")'
+      ),
+      prisma.$executeRawUnsafe(
+        'CREATE INDEX IF NOT EXISTS "media_folders_userId_idx" ON "media_folders"("userId")'
+      ),
+      prisma.$executeRawUnsafe(
+        'ALTER TABLE "media_assets" ' +
+          'ADD COLUMN IF NOT EXISTS "inLibrary" BOOLEAN NOT NULL DEFAULT false, ' +
+          'ADD COLUMN IF NOT EXISTS "folderId" TEXT'
+      ),
+      prisma.$executeRawUnsafe(
+        'DO $$ BEGIN ' +
+          'IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = \'media_assets_folderId_fkey\') THEN ' +
+          'ALTER TABLE "media_assets" ADD CONSTRAINT "media_assets_folderId_fkey" ' +
+          'FOREIGN KEY ("folderId") REFERENCES "media_folders"("id") ON DELETE SET NULL ON UPDATE CASCADE; ' +
+          'END IF; END $$'
+      ),
+      prisma.$executeRawUnsafe(
+        'CREATE INDEX IF NOT EXISTS "media_assets_folderId_idx" ON "media_assets"("folderId")'
+      ),
+      prisma.$executeRawUnsafe(
+        firstRun
+          ? 'UPDATE "media_assets" SET "inLibrary" = true WHERE "type" = \'IMAGE\' AND "inLibrary" = false'
+          : 'SELECT 1'
+      ),
+    ]);
+
+    const after = await inspectRodada7Schema();
+    const applied = {
+      tableCreated: !before.foldersTableExists && after.foldersTableExists,
+      columnsAdded: before.missingColumns.filter((c) => !after.missingColumns.includes(c)),
+      foreignKeyCreated: !before.folderFkExists && after.folderFkExists,
+      indexesCreated: before.missingIndexes.filter((i) => !after.missingIndexes.includes(i)),
+      imagesMovedToLibrary: firstRun ? Number(results[results.length - 1]) || 0 : 0,
+    };
+
+    logger.info('Rodada 7 library migration applied', { applied, schema: after });
+
+    return res.json({
+      success: true,
+      data: {
+        applied,
+        schema: after,
+        message: 'Migração Rodada 7 concluída. Biblioteca com pastas liberada - pode publicar o frontend.',
+      },
+    });
+  } catch (error) {
+    logger.error('Failed to apply Rodada 7 library migration', {
+      message: error.message,
+      code: error.code,
+      meta: error.meta,
+    });
+    return res.status(500).json({
+      success: false,
+      error: {
+        code: error.code || 'PRISMA_ERROR',
+        message: error.message,
+        details: error.meta || null,
+      },
+    });
+  }
+}
+
+router.get('/migrate-rodada7-library', migrateRodada7Library);
+router.post('/migrate-rodada7-library', migrateRodada7Library);
+
+async function inspectRodada7Schema() {
+  const [table] = await prisma.$queryRaw`
+    SELECT EXISTS (
+      SELECT 1 FROM information_schema.tables
+      WHERE table_schema = current_schema() AND table_name = 'media_folders'
+    ) AS "exists"
+  `;
+  const columns = await prisma.$queryRaw`
+    SELECT column_name FROM information_schema.columns
+    WHERE table_schema = current_schema() AND table_name = 'media_assets'
+  `;
+  const present = new Set(columns.map((c) => c.column_name));
+  const [fk] = await prisma.$queryRaw`
+    SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'media_assets_folderId_fkey') AS "exists"
+  `;
+  const indexes = await prisma.$queryRaw`
+    SELECT indexname FROM pg_indexes
+    WHERE schemaname = current_schema() AND tablename IN ('media_folders', 'media_assets')
+  `;
+  const presentIndexes = new Set(indexes.map((i) => i.indexname));
+  return {
+    foldersTableExists: Boolean(table?.exists),
+    missingColumns: ['inLibrary', 'folderId'].filter((c) => !present.has(c)),
+    folderFkExists: Boolean(fk?.exists),
+    missingIndexes: RODADA7_INDEXES.filter((i) => !presentIndexes.has(i)),
+  };
+}
+
 async function inspectRodada5Schema() {
   const columns = await prisma.$queryRaw`
     SELECT column_name FROM information_schema.columns
