@@ -476,6 +476,14 @@ function normalizeScheduledFor(input) {
 // Rodada 3: exposes instagramMediaId so the frontend can decide whether
 // to show the "Métricas" button (only for PUBLISHED posts with a valid
 // media id returned by Meta's /media_publish).
+// Rodada 19 (segurança): strips the encrypted Instagram token from the
+// account included in post responses. Every other field stays the same.
+function withoutToken(account) {
+  if (!account) return account;
+  const { accessTokenEncrypted, ...safe } = account;
+  return safe;
+}
+
 function toPublicShape(post) {
   return {
     id: post.id,
@@ -489,7 +497,8 @@ function toPublicShape(post) {
     instagramMediaId: post.instagramMediaId,
     // Rodada 4: null for single posts; same uuid for every post of a batch.
     batchId: post.batchId ?? null,
-    instagramAccount: post.instagramAccount,
+    // Rodada 19 (segurança): the encrypted token never leaves the server.
+    instagramAccount: withoutToken(post.instagramAccount),
     medias: (post.medias || []).map((pm) => ({
       order: pm.order,
       id: pm.mediaAsset.id,
