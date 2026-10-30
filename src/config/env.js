@@ -43,7 +43,8 @@ const env = {
       process.env.INSTAGRAM_OAUTH_TOKEN_URL || 'https://api.instagram.com/oauth/access_token',
     scopes:
       process.env.INSTAGRAM_OAUTH_SCOPES ||
-      'instagram_business_basic,instagram_business_content_publish',
+      // Rodada 13: + instagram_business_manage_insights (Dashboard metrics).
+      'instagram_business_basic,instagram_business_content_publish,instagram_business_manage_insights',
   },
 
   // Cloudinary section KEPT so legacy MediaAsset rows (storageProvider =

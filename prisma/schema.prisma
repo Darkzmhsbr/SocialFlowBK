@@ -128,6 +128,9 @@ model User {
   cleanupJobs    CleanupJob[]
   cleanupSetting CleanupSetting?
 
+  // Rodada 13: daily account metrics
+  insightSnapshots AccountInsightSnapshot[]
+
   @@map("users")
 }
 
@@ -175,6 +178,9 @@ model InstagramAccount {
   // Rodada 10: app used to connect this profile (null = default app)
   metaAppCredentialId String?
   metaAppCredential   MetaAppCredential? @relation(fields: [metaAppCredentialId], references: [id], onDelete: SetNull)
+
+  // Rodada 13: daily metrics snapshots
+  insightSnapshots AccountInsightSnapshot[]
 
   @@index([userId])
   @@index([metaAppCredentialId])
@@ -484,4 +490,36 @@ model CleanupSetting {
   updatedAt              DateTime  @updatedAt
 
   @@map("cleanup_settings")
+}
+
+// Rodada 13: one row per profile per day (America/Sao_Paulo calendar day).
+// Collected automatically once a day by metricsService. followersCount is
+// the value read when the day was collected (null on backfilled days).
+// The insight columns are the day's totals; null when the profile's token
+// has no insights permission (insightsOk = false).
+model AccountInsightSnapshot {
+  id                 String           @id @default(uuid())
+  userId             String
+  user               User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  instagramAccountId String
+  instagramAccount   InstagramAccount @relation(fields: [instagramAccountId], references: [id], onDelete: Cascade)
+  date               DateTime         @db.Date
+  followersCount     Int?
+  followsCount       Int?
+  mediaCount         Int?
+  reach              Int?
+  views              Int?
+  accountsEngaged    Int?
+  totalInteractions  Int?
+  likes              Int?
+  comments           Int?
+  shares             Int?
+  saves              Int?
+  insightsOk         Boolean          @default(true)
+  createdAt          DateTime         @default(now())
+  updatedAt          DateTime         @updatedAt
+
+  @@unique([instagramAccountId, date])
+  @@index([userId, date])
+  @@map("account_insight_snapshots")
 }

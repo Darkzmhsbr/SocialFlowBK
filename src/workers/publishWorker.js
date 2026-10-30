@@ -37,6 +37,8 @@ const notificationService = require('../services/notifications/notificationServi
 const accountHealthService = require('../services/instagram/accountHealthService');
 // Rodada 12: background cleanup jobs + daily automatic rules.
 const cleanupService = require('../services/cleanup/cleanupService');
+// Rodada 13: daily metrics collection for the Dashboard.
+const metricsService = require('../services/metrics/metricsService');
 
 let isTicking = false;
 let task = null;
@@ -208,6 +210,8 @@ function start() {
   accountHealthService.startHealthChecks();
   // Rodada 12
   cleanupService.startRunner();
+  // Rodada 13
+  metricsService.startCollector();
 }
 
 function stop() {
@@ -220,6 +224,8 @@ function stop() {
   accountHealthService.stopHealthChecks();
   // Rodada 12
   cleanupService.stopRunner();
+  // Rodada 13
+  metricsService.stopCollector();
 }
 
 module.exports = { start, stop, tick };

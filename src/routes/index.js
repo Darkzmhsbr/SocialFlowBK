@@ -13,6 +13,8 @@ const notificationsRoutes = require('./notificationsRoutes');
 const adminRoutes = require('./adminRoutes');
 // Rodada 12
 const cleanupRoutes = require('./cleanupRoutes');
+// Rodada 13
+const metricsRoutes = require('./metricsRoutes');
 
 const router = Router();
 
@@ -27,5 +29,6 @@ router.use('/invites', invitesRoutes); // -> /api/invites/*
 router.use('/notifications', notificationsRoutes); // -> /api/notifications/* (Rodada 5)
 router.use('/admin', adminRoutes); // -> /api/admin/* (Rodada 11)
 router.use('/cleanup', cleanupRoutes); // -> /api/cleanup/* (Rodada 12)
+router.use('/metrics', metricsRoutes); // -> /api/metrics/* (Rodada 13)
 
 module.exports = router;

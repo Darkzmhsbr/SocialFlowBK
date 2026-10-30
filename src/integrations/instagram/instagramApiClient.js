@@ -339,6 +339,69 @@ function toAppError(error, contextMessage) {
   return new AppError(ErrorCodes.META_API_ERROR, 'Não foi possível comunicar com o Instagram.', 502);
 }
 
+// --- Rodada 13: account metrics (Dashboard) ------------------------------
+
+/**
+ * Current profile counters. Works with the basic scope.
+ * @returns {Promise<{ followersCount: number|null, followsCount: number|null, mediaCount: number|null }>}
+ */
+async function fetchAccountStats(igUserId, accessToken) {
+  try {
+    const { data } = await axios.get(`${apiBase()}/${igUserId}`, {
+      params: {
+        fields: 'followers_count,follows_count,media_count',
+        access_token: accessToken,
+      },
+      timeout: 15000,
+    });
+    const num = (v) => (typeof v === 'number' ? v : null);
+    return {
+      followersCount: num(data?.followers_count),
+      followsCount: num(data?.follows_count),
+      mediaCount: num(data?.media_count),
+    };
+  } catch (error) {
+    if (error instanceof AppError) throw error;
+    throw toAppError(error, 'Failed to fetch Instagram account stats');
+  }
+}
+
+/**
+ * Account-level insights totals for one period (since/until = unix seconds).
+ * Uses metric_type=total_value, so each metric comes back as one number for
+ * the whole period. Requires scope `instagram_business_manage_insights`.
+ *
+ * Meta returns { data: [{ name: "reach", total_value: { value: 123 } }, ...] }
+ *
+ * @returns {Promise<Object<string, number>>} e.g. { reach: 123, views: 456 }
+ */
+async function fetchAccountInsights(igUserId, accessToken, { metrics, since, until }) {
+  try {
+    const { data } = await axios.get(`${apiBase()}/${igUserId}/insights`, {
+      params: {
+        metric: metrics.join(','),
+        period: 'day',
+        metric_type: 'total_value',
+        since,
+        until,
+        access_token: accessToken,
+      },
+      timeout: 15000,
+    });
+    const result = {};
+    if (Array.isArray(data?.data)) {
+      for (const item of data.data) {
+        const value = item.total_value?.value ?? item.values?.[0]?.value;
+        result[item.name] = typeof value === 'number' ? value : 0;
+      }
+    }
+    return result;
+  } catch (error) {
+    if (error instanceof AppError) throw error;
+    throw toAppError(error, 'Failed to fetch Instagram account insights');
+  }
+}
+
 // --- Rodada 5: publishing quota -------------------------------------------
 
 /**
@@ -384,4 +447,7 @@ module.exports = {
   fetchMediaInsights,
   // Rodada 5
   fetchContentPublishingLimit,
+  // Rodada 13
+  fetchAccountStats,
+  fetchAccountInsights,
 };

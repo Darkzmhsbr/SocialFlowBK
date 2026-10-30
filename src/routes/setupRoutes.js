@@ -934,6 +934,147 @@ async function migrateRodada12Cleanup(req, res) {
 router.get('/migrate-rodada12-cleanup', migrateRodada12Cleanup);
 router.post('/migrate-rodada12-cleanup', migrateRodada12Cleanup);
 
+// GET  /api/setup/migrate-rodada13-metrics?token=SEU_TOKEN   (pelo navegador)
+// POST /api/setup/migrate-rodada13-metrics?token=SEU_TOKEN   (curl/Postman)
+//
+// Rodada 13 (Dashboard metrics) schema migration:
+//   - account_insight_snapshots: new table + FKs users / instagram_accounts
+//     (CASCADE) + unique (instagramAccountId, date) + index (userId, date)
+// Names match what Prisma generates for schema.prisma (no drift).
+// Run RIGHT AFTER the backend deploy goes Active. Idempotent,
+// transactional, existing data untouched.
+const RODADA13_INDEXES = [
+  'account_insight_snapshots_instagramAccountId_date_key',
+  'account_insight_snapshots_userId_date_idx',
+];
+
+async function migrateRodada13Metrics(req, res) {
+  if (!assertSetupToken(req, res)) return;
+
+  try {
+    const before = await inspectRodada13Schema();
+    if (before.table && before.missingIndexes.length === 0 && before.missingForeignKeys.length === 0) {
+      return res.json({
+        success: true,
+        data: {
+          applied: { tablesCreated: [], indexesCreated: [], foreignKeysCreated: [] },
+          schema: before,
+          message: 'Nada a migrar. As métricas do Dashboard já existem.',
+        },
+      });
+    }
+
+    await prisma.$transaction([
+      prisma.$executeRawUnsafe(
+        'CREATE TABLE IF NOT EXISTS "account_insight_snapshots" (' +
+          '"id" TEXT NOT NULL, ' +
+          '"userId" TEXT NOT NULL, ' +
+          '"instagramAccountId" TEXT NOT NULL, ' +
+          '"date" DATE NOT NULL, ' +
+          '"followersCount" INTEGER, ' +
+          '"followsCount" INTEGER, ' +
+          '"mediaCount" INTEGER, ' +
+          '"reach" INTEGER, ' +
+          '"views" INTEGER, ' +
+          '"accountsEngaged" INTEGER, ' +
+          '"totalInteractions" INTEGER, ' +
+          '"likes" INTEGER, ' +
+          '"comments" INTEGER, ' +
+          '"shares" INTEGER, ' +
+          '"saves" INTEGER, ' +
+          '"insightsOk" BOOLEAN NOT NULL DEFAULT true, ' +
+          '"createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP, ' +
+          '"updatedAt" TIMESTAMP(3) NOT NULL, ' +
+          'CONSTRAINT "account_insight_snapshots_pkey" PRIMARY KEY ("id")' +
+          ')'
+      ),
+      prisma.$executeRawUnsafe(
+        'CREATE UNIQUE INDEX IF NOT EXISTS "account_insight_snapshots_instagramAccountId_date_key" ' +
+          'ON "account_insight_snapshots"("instagramAccountId", "date")'
+      ),
+      prisma.$executeRawUnsafe(
+        'CREATE INDEX IF NOT EXISTS "account_insight_snapshots_userId_date_idx" ' +
+          'ON "account_insight_snapshots"("userId", "date")'
+      ),
+      prisma.$executeRawUnsafe(
+        'DO $$ BEGIN ' +
+          'IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = \'account_insight_snapshots_userId_fkey\') THEN ' +
+          'ALTER TABLE "account_insight_snapshots" ADD CONSTRAINT "account_insight_snapshots_userId_fkey" ' +
+          'FOREIGN KEY ("userId") REFERENCES "users"("id") ON DELETE CASCADE ON UPDATE CASCADE; ' +
+          'END IF; END $$;'
+      ),
+      prisma.$executeRawUnsafe(
+        'DO $$ BEGIN ' +
+          'IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = \'account_insight_snapshots_instagramAccountId_fkey\') THEN ' +
+          'ALTER TABLE "account_insight_snapshots" ADD CONSTRAINT "account_insight_snapshots_instagramAccountId_fkey" ' +
+          'FOREIGN KEY ("instagramAccountId") REFERENCES "instagram_accounts"("id") ON DELETE CASCADE ON UPDATE CASCADE; ' +
+          'END IF; END $$;'
+      ),
+    ]);
+
+    const after = await inspectRodada13Schema();
+    const applied = {
+      tablesCreated: !before.table && after.table ? ['account_insight_snapshots'] : [],
+      indexesCreated: before.missingIndexes.filter((i) => !after.missingIndexes.includes(i)),
+      foreignKeysCreated: before.missingForeignKeys.filter((f) => !after.missingForeignKeys.includes(f)),
+    };
+
+    logger.info('Rodada 13 metrics migration applied', { applied, schema: after });
+
+    return res.json({
+      success: true,
+      data: {
+        applied,
+        schema: after,
+        message: 'Migração Rodada 13 concluída. Métricas do Dashboard liberadas - pode publicar o frontend.',
+      },
+    });
+  } catch (error) {
+    logger.error('Failed to apply Rodada 13 metrics migration', {
+      message: error.message,
+      code: error.code,
+      meta: error.meta,
+    });
+    return res.status(500).json({
+      success: false,
+      error: {
+        code: error.code || 'PRISMA_ERROR',
+        message: error.message,
+        details: error.meta || null,
+      },
+    });
+  }
+}
+
+router.get('/migrate-rodada13-metrics', migrateRodada13Metrics);
+router.post('/migrate-rodada13-metrics', migrateRodada13Metrics);
+
+async function inspectRodada13Schema() {
+  const [table] = await prisma.$queryRaw`
+    SELECT EXISTS (
+      SELECT 1 FROM information_schema.tables
+      WHERE table_schema = current_schema() AND table_name = 'account_insight_snapshots'
+    ) AS "exists"
+  `;
+  const indexes = await prisma.$queryRaw`
+    SELECT indexname::text AS indexname FROM pg_indexes
+    WHERE schemaname = current_schema() AND tablename = 'account_insight_snapshots'
+  `;
+  const fks = await prisma.$queryRaw`
+    SELECT conname::text AS conname FROM pg_constraint
+    WHERE conname IN ('account_insight_snapshots_userId_fkey', 'account_insight_snapshots_instagramAccountId_fkey')
+  `;
+  const presentIndexes = new Set(indexes.map((i) => i.indexname));
+  const presentFks = new Set(fks.map((f) => f.conname));
+  return {
+    table: Boolean(table?.exists),
+    missingIndexes: RODADA13_INDEXES.filter((i) => !presentIndexes.has(i)),
+    missingForeignKeys: ['account_insight_snapshots_userId_fkey', 'account_insight_snapshots_instagramAccountId_fkey'].filter(
+      (f) => !presentFks.has(f)
+    ),
+  };
+}
+
 async function inspectRodada12Schema() {
   const [column] = await prisma.$queryRaw`
     SELECT EXISTS (
