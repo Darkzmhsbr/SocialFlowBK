@@ -33,6 +33,8 @@ const ALERT_TYPES = [
   { key: 'POST_VIRAL', label: 'Post viral (muito acima da média do perfil em 24h)', default: true },
   { key: 'CLEANUP_FINISHED', label: 'Limpeza concluída', default: false },
   { key: 'DAILY_SUMMARY', label: 'Resumo do dia (21h)', default: false },
+  // Rodada 19B
+  { key: 'WEEKLY_REPORT', label: 'Relatório semanal (segunda de manhã)', default: true },
 ];
 const ALERT_KEYS = new Set(ALERT_TYPES.map((a) => a.key));
 const DEFAULT_ALERTS = ALERT_TYPES.filter((a) => a.default).map((a) => a.key);

@@ -238,6 +238,11 @@ model MediaAsset {
   durationSec        Float?              // only set for VIDEO
 
   // Rodada 7: media library.
+  // Rodada 19B: name of the file on the user's computer ("video01.mp4"),
+  // unique per user ("video01 (2).mp4" when repeated). Used by the
+  // spreadsheet import to find the media.
+  originalName       String?
+
   inLibrary          Boolean      @default(false)
   folderId           String?
   folder             MediaFolder? @relation(fields: [folderId], references: [id], onDelete: SetNull)
@@ -254,6 +259,7 @@ model MediaAsset {
 
   @@index([userId])
   @@index([folderId])
+  @@index([userId, originalName])
   @@map("media_assets")
 }
 

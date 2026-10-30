@@ -106,6 +106,9 @@ const ErrorCodes = {
 
   // Rodada 18 - performance
   PERFORMANCE_INVALID: 'PERFORMANCE_INVALID',
+
+  // Rodada 19B - spreadsheet import
+  IMPORT_INVALID: 'IMPORT_INVALID',
 };
 
 module.exports = { AppError, ErrorCodes };

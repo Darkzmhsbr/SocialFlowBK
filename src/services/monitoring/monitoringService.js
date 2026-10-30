@@ -371,8 +371,10 @@ async function monitorTick(now = Date.now()) {
     const tokens = await checkTokens(now);
     const queues = await checkEmptyQueues(now);
     const summaries = await dailySummaries(now);
-    if (tokens || queues || summaries) logger.info('Monitor alerts', { tokens, queues, summaries });
-    return { tokens, queues, summaries };
+    // Rodada 19B: Monday 08:00+ weekly report (bell + Telegram). Lazy require.
+    const weekly = await require('../reports/reportService').weeklyTick(now).catch(() => 0);
+    if (tokens || queues || summaries || weekly) logger.info('Monitor alerts', { tokens, queues, summaries, weekly }); // Rodada 19B: + weekly
+    return { tokens, queues, summaries, weekly };
   } catch (err) {
     logger.error('Monitor tick failed', { error: err.message });
     return null;

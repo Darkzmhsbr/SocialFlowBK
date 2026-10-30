@@ -58,7 +58,11 @@ async function uploadFile({ userId, file }) {
     filename: file.originalname,
   });
 
+  // Rodada 19B: keep the file's own name (unique per user) for the import.
+  const originalName = await uniqueMediaName(userId, file.originalname, uploaded.format).catch(() => null);
+
   const asset = await mediaRepository.create({
+    originalName, // Rodada 19B
     userId,
     type,
     storageKey: uploaded.storageKey,
@@ -80,6 +84,40 @@ async function uploadFile({ userId, file }) {
   });
 
   return asset;
+}
+
+// --- Rodada 19B: original file names -------------------------------------
+
+/** "Meu Vídeo.MP4" stays "Meu Vídeo.MP4"; a repeated name becomes "Meu Vídeo (2).MP4". */
+async function uniqueMediaName(userId, rawName, format) {
+  // multer reads the file name as latin1: "vídeo.mp4" arrives as "vÃ­deo.mp4".
+  let fixedName = String(rawName || '');
+  try {
+    const utf8 = Buffer.from(fixedName, 'latin1').toString('utf8');
+    if (utf8 !== fixedName && !utf8.includes('\uFFFD')) fixedName = utf8;
+  } catch {
+    // keep as received
+  }
+  let name = fixedName
+    .replace(/[\\/]/g, '_')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(-120);
+  if (!name) name = `midia.${format || 'bin'}`;
+  const dot = name.lastIndexOf('.');
+  const stem = dot > 0 ? name.slice(0, dot) : name;
+  const ext = dot > 0 ? name.slice(dot) : '';
+  const taken = await prisma.mediaAsset.findMany({
+    where: { userId, originalName: { startsWith: stem, mode: 'insensitive' } },
+    select: { originalName: true },
+  });
+  const used = new Set(taken.map((t) => String(t.originalName).toLowerCase()));
+  if (!used.has(name.toLowerCase())) return name;
+  for (let i = 2; i < 10000; i += 1) {
+    const candidate = `${stem} (${i})${ext}`;
+    if (!used.has(candidate.toLowerCase())) return candidate;
+  }
+  return `${stem}-${Date.now()}${ext}`;
 }
 
 function classifyMime(mimetype) {
@@ -235,6 +273,8 @@ function toPublicShape(asset) {
     folderId: asset.folderId ?? null,
     // Rodada 12: file freed by a cleanup
     purged: Boolean(asset.purgedAt),
+    // Rodada 19B: name used by the spreadsheet import
+    originalName: asset.originalName ?? null,
   };
 }
 

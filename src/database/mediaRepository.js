@@ -14,6 +14,7 @@ function create({
   width,
   height,
   durationSec,
+  originalName = null, // Rodada 19B
 }) {
   return prisma.mediaAsset.create({
     data: {
@@ -30,6 +31,7 @@ function create({
       width,
       height,
       durationSec,
+      ...(originalName ? { originalName } : {}), // Rodada 19B
     },
   });
 }

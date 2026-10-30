@@ -1412,6 +1412,101 @@ async function migrateRodada18Performance(req, res) {
 router.get('/migrate-rodada18-performance', migrateRodada18Performance);
 router.post('/migrate-rodada18-performance', migrateRodada18Performance);
 
+// GET  /api/setup/migrate-rodada19-import?token=SEU_TOKEN   (pelo navegador)
+// POST /api/setup/migrate-rodada19-import?token=SEU_TOKEN   (curl/Postman)
+//
+// Rodada 19B (importação por planilha) schema migration:
+//   - media_assets."originalName" TEXT (nullable) + index (userId, originalName)
+//   - existing media get a provisional name: midia-<8 chars of the id>.<format>
+//     (only rows without a name; new uploads keep the file's own name)
+// Names match what Prisma generates for schema.prisma (no drift).
+// Run RIGHT AFTER the backend deploy goes Active. Idempotent,
+// transactional, existing data untouched (except the empty name above).
+async function migrateRodada19Import(req, res) {
+  if (!assertSetupToken(req, res)) return;
+
+  try {
+    const before = await inspectRodada19Schema();
+    if (before.column && before.index && before.unnamed === 0) {
+      return res.json({
+        success: true,
+        data: {
+          applied: { columnAdded: false, indexCreated: false, namesFilled: 0 },
+          schema: before,
+          message: 'Nada a migrar. A importação por planilha já existe.',
+        },
+      });
+    }
+
+    const results = await prisma.$transaction([
+      prisma.$executeRawUnsafe('ALTER TABLE "media_assets" ADD COLUMN IF NOT EXISTS "originalName" TEXT'),
+      prisma.$executeRawUnsafe(
+        'CREATE INDEX IF NOT EXISTS "media_assets_userId_originalName_idx" ON "media_assets"("userId", "originalName")'
+      ),
+      prisma.$executeRawUnsafe(
+        'UPDATE "media_assets" SET "originalName" = \'midia-\' || substr("id", 1, 8) || \'.\' || "format" ' +
+          'WHERE "originalName" IS NULL'
+      ),
+    ]);
+
+    const after = await inspectRodada19Schema();
+    const applied = {
+      columnAdded: !before.column && after.column,
+      indexCreated: !before.index && after.index,
+      namesFilled: Number(results[2]) || 0,
+    };
+
+    logger.info('Rodada 19 import migration applied', { applied, schema: after });
+
+    return res.json({
+      success: true,
+      data: {
+        applied,
+        schema: after,
+        message: 'Migração Rodada 19 concluída. Importação por planilha liberada - pode publicar o frontend.',
+      },
+    });
+  } catch (error) {
+    logger.error('Failed to apply Rodada 19 import migration', {
+      message: error.message,
+      code: error.code,
+      meta: error.meta,
+    });
+    return res.status(500).json({
+      success: false,
+      error: {
+        code: error.code || 'PRISMA_ERROR',
+        message: error.message,
+        details: error.meta || null,
+      },
+    });
+  }
+}
+
+router.get('/migrate-rodada19-import', migrateRodada19Import);
+router.post('/migrate-rodada19-import', migrateRodada19Import);
+
+async function inspectRodada19Schema() {
+  const [column] = await prisma.$queryRaw`
+    SELECT EXISTS (
+      SELECT 1 FROM information_schema.columns
+      WHERE table_schema = current_schema() AND table_name = 'media_assets' AND column_name = 'originalName'
+    ) AS "exists"
+  `;
+  const [index] = await prisma.$queryRaw`
+    SELECT EXISTS (
+      SELECT 1 FROM pg_indexes
+      WHERE schemaname = current_schema() AND indexname = 'media_assets_userId_originalName_idx'
+    ) AS "exists"
+  `;
+  let unnamed = 0;
+  if (column?.exists) {
+    const [row] = await prisma.$queryRaw`SELECT COUNT(*)::int AS "n" FROM "media_assets" WHERE "originalName" IS NULL`;
+    unnamed = Number(row?.n) || 0;
+  }
+  return { column: Boolean(column?.exists), index: Boolean(index?.exists), unnamed };
+}
+
 async function inspectRodada18Schema() {
   const columns = await prisma.$queryRaw`
     SELECT column_name::text AS column_name FROM information_schema.columns
