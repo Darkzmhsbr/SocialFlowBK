@@ -1042,7 +1042,7 @@ async function publishBatchNow(batchId, userId, { intervalMinutes, windowMinutes
 // -----------------------------------------------------------------------
 
 const BULK_MAX_POSTS = 2000;
-const BULK_ACTIONS = new Set(['delete', 'archive', 'publish-now']);
+const BULK_ACTIONS = new Set(['delete', 'archive', 'publish-now', 'shift-days']); // Rodada 15: + shift-days
 
 /**
  * Validates/normalizes the filters sent by the page (query string or body).
@@ -1062,6 +1062,91 @@ function normalizeListFilters(raw = {}) {
     q: raw.q ? String(raw.q).slice(0, 100) : undefined,
     // Rodada 8: filter by profile folder
     accountFolderId: raw.folderId || raw.accountFolderId || undefined,
+    // Rodada 15: calendar range + several statuses
+    ...parseCalendarRange(raw),
+    // With a date range and no status chosen, the calendar default applies
+    // (no drafts, no archived).
+    statuses: parseStatuses(raw.statuses) ?? (raw.from && raw.to && !status ? CALENDAR_DEFAULT_STATUSES : undefined),
+  };
+}
+
+// --- Rodada 15: calendar --------------------------------------------------
+
+const CALENDAR_DEFAULT_STATUSES = ['SCHEDULED', 'QUEUED', 'PUBLISHING', 'PUBLISHED', 'FAILED'];
+const CALENDAR_MAX_DAYS = 62;
+const SHIFT_STATUSES = new Set(['SCHEDULED', 'FAILED']);
+
+function parseStatuses(input) {
+  if (input === undefined || input === null || input === '') return undefined;
+  const list = (Array.isArray(input) ? input : String(input).split(','))
+    .map((s) => String(s).trim())
+    .filter(Boolean);
+  for (const s of list) {
+    if (!isValidStatus(s)) {
+      throw new AppError(ErrorCodes.VALIDATION_ERROR, `Filtro de status inválido: ${s}.`, 400);
+    }
+  }
+  return list.length ? list : undefined;
+}
+
+// from/to are calendar days (YYYY-MM-DD, `to` inclusive) in the viewer's
+// time zone; tzOffset = minutes behind UTC (JS getTimezoneOffset, 180 for
+// Brasília). Returns real instants { from, to } (to exclusive) or {}.
+function parseCalendarRange(raw = {}) {
+  if (!raw.from && !raw.to) return {};
+  const re = /^\d{4}-\d{2}-\d{2}$/;
+  if (!re.test(String(raw.from || '')) || !re.test(String(raw.to || ''))) {
+    throw new AppError(ErrorCodes.VALIDATION_ERROR, 'Período inválido (use AAAA-MM-DD).', 400);
+  }
+  const offset = clampNumber(raw.tzOffset, -840, 840, 180);
+  const from = new Date(Date.parse(`${raw.from}T00:00:00Z`) + offset * 60000);
+  const to = new Date(Date.parse(`${raw.to}T00:00:00Z`) + 86400000 + offset * 60000);
+  const days = Math.round((to - from) / 86400000);
+  if (!(days >= 1 && days <= CALENDAR_MAX_DAYS)) {
+    throw new AppError(ErrorCodes.VALIDATION_ERROR, `O período deve ter de 1 a ${CALENDAR_MAX_DAYS} dias.`, 400);
+  }
+  return { from, to, tzOffset: offset };
+}
+
+function localDay(date, tzOffset) {
+  return new Date(new Date(date).getTime() - tzOffset * 60000).toISOString().slice(0, 10);
+}
+
+/**
+ * Per-day counters for the calendar page.
+ * Query: from, to (YYYY-MM-DD), tzOffset, folderId, accountId, types, q, statuses
+ * Returns { days: [{ date, total, accounts, byType, byStatus }], totals, truncated }
+ */
+async function getCalendar(userId, raw = {}) {
+  if (!raw.from || !raw.to) {
+    throw new AppError(ErrorCodes.VALIDATION_ERROR, 'Informe o período (from e to).', 400);
+  }
+  const filters = normalizeListFilters(raw);
+  if (!filters.status && !filters.statuses) filters.statuses = CALENDAR_DEFAULT_STATUSES;
+  const LIMIT = 60000;
+  const rows = await postRepository.findCalendarRows(userId, filters, LIMIT);
+
+  const byDay = new Map();
+  const totals = { total: 0, accounts: new Set(), byType: {}, byStatus: {} };
+  for (const row of rows) {
+    const when = row.status === 'PUBLISHED' ? row.publishedAt : row.scheduledFor;
+    if (!when) continue;
+    const date = localDay(when, filters.tzOffset);
+    if (!byDay.has(date)) byDay.set(date, { date, total: 0, accounts: new Set(), byType: {}, byStatus: {} });
+    for (const bucket of [byDay.get(date), totals]) {
+      bucket.total += 1;
+      bucket.accounts.add(row.instagramAccountId);
+      bucket.byType[row.type] = (bucket.byType[row.type] || 0) + 1;
+      bucket.byStatus[row.status] = (bucket.byStatus[row.status] || 0) + 1;
+    }
+  }
+  const days = [...byDay.values()]
+    .sort((a, b) => a.date.localeCompare(b.date))
+    .map((d) => ({ ...d, accounts: d.accounts.size }));
+  return {
+    days,
+    totals: { ...totals, accounts: totals.accounts.size },
+    truncated: rows.length >= LIMIT,
   };
 }
 
@@ -1085,7 +1170,7 @@ async function getPostsOverview(userId, rawFilters) {
  *                  profile, profiles spread over windowMinutes)
  * Returns { action, matched, affected, skipped }.
  */
-async function bulkAction(userId, { action, ids, filter, intervalMinutes, windowMinutes } = {}) {
+async function bulkAction(userId, { action, ids, filter, intervalMinutes, windowMinutes, days } = {}) { // Rodada 15: + days
   if (!BULK_ACTIONS.has(action)) {
     throw new AppError(ErrorCodes.VALIDATION_ERROR, `Ação inválida: ${action}.`, 400);
   }
@@ -1143,6 +1228,29 @@ async function bulkAction(userId, { action, ids, filter, intervalMinutes, window
     const { count } = archivable.length ? await postRepository.archiveManyByIds(archivable) : { count: 0 };
     logger.info('Bulk archive', { userId, matched, archived: count });
     return { action, matched, affected: count, skipped: matched - count };
+  }
+
+  // Rodada 15: move scheduled/failed posts N days (same time of day).
+  if (action === 'shift-days') {
+    const shift = Number(days);
+    if (!Number.isInteger(shift) || shift === 0 || Math.abs(shift) > 60) {
+      throw new AppError(ErrorCodes.VALIDATION_ERROR, 'Informe de -60 a 60 dias (diferente de 0).', 400);
+    }
+    const minDate = Date.now() + 60 * 1000;
+    const entries = [];
+    let past = 0;
+    for (const post of posts) {
+      if (!SHIFT_STATUSES.has(post.status) || !post.scheduledFor) continue;
+      const next = new Date(new Date(post.scheduledFor).getTime() + shift * 86400000);
+      if (next.getTime() < minDate) {
+        past += 1;
+        continue;
+      }
+      entries.push({ id: post.id, scheduledFor: next });
+    }
+    const moved = entries.length ? await postRepository.requeueMany(entries) : 0;
+    logger.info('Bulk shift-days', { userId, matched, moved, days: shift });
+    return { action, matched, affected: moved, skipped: matched - moved, inPast: past };
   }
 
   // publish-now
@@ -1210,4 +1318,6 @@ module.exports = {
   queryPosts,
   getPostsOverview,
   bulkAction,
+  // Rodada 15
+  getCalendar,
 };

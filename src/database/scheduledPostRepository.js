@@ -570,8 +570,20 @@ async function requeueMany(entries) {
  *   q                   - text in the caption OR in the @username
  */
 // Rodada 8: accountFolderId -> only posts of profiles in that folder.
-function buildPostFilterWhere(userId, { status, statuses, instagramAccountId, types, q, accountFolderId } = {}) {
+// Rodada 15: from/to (Date) -> calendar date range: publishedAt for
+// published posts, scheduledFor for everything else.
+function buildPostFilterWhere(userId, { status, statuses, instagramAccountId, types, q, accountFolderId, from, to } = {}) {
   const where = { userId };
+  if (from && to) {
+    where.AND = [
+      {
+        OR: [
+          { status: 'PUBLISHED', publishedAt: { gte: from, lt: to } },
+          { status: { not: 'PUBLISHED' }, scheduledFor: { gte: from, lt: to } },
+        ],
+      },
+    ];
+  }
   if (accountFolderId) {
     where.instagramAccount = { folderMemberships: { some: { folderId: accountFolderId } } };
   }
@@ -597,12 +609,15 @@ function orderForStatus(status) {
   return [{ scheduledFor: 'asc' }, { createdAt: 'desc' }, { id: 'asc' }];
 }
 
+// Rodada 15: calendar lists (date range) go in time order.
+const CALENDAR_ORDER = [{ scheduledFor: 'asc' }, { publishedAt: 'asc' }, { id: 'asc' }];
+
 async function findPageFiltered(userId, filters = {}, { take = 50, skip = 0 } = {}) {
   const where = buildPostFilterWhere(userId, filters);
   const [posts, total] = await prisma.$transaction([
     prisma.scheduledPost.findMany({
       where,
-      orderBy: orderForStatus(filters.status),
+      orderBy: filters.from ? CALENDAR_ORDER : orderForStatus(filters.status), // Rodada 15: was orderForStatus(filters.status)
       take,
       skip,
       include: POST_INCLUDE,
@@ -653,6 +668,18 @@ async function getOverview(userId, filters = {}) {
         }
       : null,
   };
+}
+
+/**
+ * Rodada 15: minimal rows for the calendar summary (counted per day by the
+ * service). `limit` protects memory on very large operations.
+ */
+function findCalendarRows(userId, filters = {}, limit = 60000) {
+  return prisma.scheduledPost.findMany({
+    where: buildPostFilterWhere(userId, filters),
+    select: { status: true, type: true, instagramAccountId: true, scheduledFor: true, publishedAt: true },
+    take: limit,
+  });
 }
 
 /** Ids matching a filter ("selecionar todos os filtrados"), capped. */
@@ -706,4 +733,6 @@ module.exports = {
   getOverview,
   findIdsByFilter,
   findManyByIdsForUser,
+  // Rodada 15
+  findCalendarRows,
 };

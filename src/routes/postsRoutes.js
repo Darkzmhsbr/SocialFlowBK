@@ -25,6 +25,8 @@ router.delete('/batch/:batchId', asyncHandler(controller.deleteBatch));
 // Rodada 6: Agendamentos page. Declared before /:id so "query"/"overview"
 // are never read as post ids.
 router.get('/query', asyncHandler(controller.queryPosts));
+// Rodada 15: calendar summary (also before /:id).
+router.get('/calendar', asyncHandler(controller.getCalendar));
 router.get('/overview', asyncHandler(controller.getPostsOverview));
 router.post('/bulk', asyncHandler(controller.bulkPosts));
 

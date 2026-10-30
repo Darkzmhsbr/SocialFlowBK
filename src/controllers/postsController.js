@@ -239,6 +239,14 @@ const bulkPosts = async (req, res) => {
   return ok(res, { result });
 };
 
+// GET /api/posts/calendar?from=AAAA-MM-DD&to=AAAA-MM-DD&tzOffset=180&folderId=&accountId=&types=&statuses=
+// Rodada 15: per-day counters for the calendar page.
+const getCalendar = async (req, res) => {
+  const calendar = await postService.getCalendar(req.userId, req.query);
+  return ok(res, { calendar });
+};
+
+module.exports.getCalendar = getCalendar;
 module.exports.queryPosts = queryPosts;
 module.exports.getPostsOverview = getPostsOverview;
 module.exports.bulkPosts = bulkPosts;
