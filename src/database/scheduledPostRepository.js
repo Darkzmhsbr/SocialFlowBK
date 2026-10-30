@@ -560,6 +560,116 @@ async function requeueMany(entries) {
   return results.reduce((sum, r) => sum + r.count, 0);
 }
 
+// --- Rodada 6: Agendamentos page (search, counters, bulk actions) --------
+
+/**
+ * Shared WHERE for the Agendamentos page. Always scoped to userId.
+ *   status / statuses   - one status or a list
+ *   instagramAccountId  - one profile
+ *   types               - list of ScheduledPostType
+ *   q                   - text in the caption OR in the @username
+ */
+function buildPostFilterWhere(userId, { status, statuses, instagramAccountId, types, q } = {}) {
+  const where = { userId };
+  if (status) where.status = status;
+  else if (Array.isArray(statuses) && statuses.length > 0) where.status = { in: statuses };
+  if (instagramAccountId) where.instagramAccountId = instagramAccountId;
+  if (Array.isArray(types) && types.length > 0) where.type = { in: types };
+  const term = String(q || '').trim().replace(/^@/, '');
+  if (term) {
+    where.OR = [
+      { caption: { contains: term, mode: 'insensitive' } },
+      { instagramAccount: { username: { contains: term, mode: 'insensitive' } } },
+    ];
+  }
+  return where;
+}
+
+// Published: newest first. Failed/archived: most recently changed first.
+// Everything else: next to publish first (Postgres puts NULL dates last on ASC).
+function orderForStatus(status) {
+  if (status === 'PUBLISHED') return [{ publishedAt: 'desc' }, { id: 'asc' }];
+  if (status === 'FAILED' || status === 'ARCHIVED') return [{ updatedAt: 'desc' }, { id: 'asc' }];
+  return [{ scheduledFor: 'asc' }, { createdAt: 'desc' }, { id: 'asc' }];
+}
+
+async function findPageFiltered(userId, filters = {}, { take = 50, skip = 0 } = {}) {
+  const where = buildPostFilterWhere(userId, filters);
+  const [posts, total] = await prisma.$transaction([
+    prisma.scheduledPost.findMany({
+      where,
+      orderBy: orderForStatus(filters.status),
+      take,
+      skip,
+      include: POST_INCLUDE,
+    }),
+    prisma.scheduledPost.count({ where }),
+  ]);
+  return { posts, total };
+}
+
+/**
+ * Counters for the filter chips + the next scheduled post.
+ *   byStatus: counts with every filter EXCEPT status
+ *   byType:   counts with every filter EXCEPT type
+ */
+async function getOverview(userId, filters = {}) {
+  const whereNoStatus = buildPostFilterWhere(userId, { ...filters, status: undefined, statuses: undefined });
+  const whereNoType = buildPostFilterWhere(userId, { ...filters, types: undefined });
+  const whereNext = {
+    ...buildPostFilterWhere(userId, { ...filters, status: 'SCHEDULED', statuses: undefined }),
+    scheduledFor: { gte: new Date() },
+  };
+
+  const [byStatusRows, byTypeRows, next] = await Promise.all([
+    prisma.scheduledPost.groupBy({ by: ['status'], where: whereNoStatus, _count: { _all: true } }),
+    prisma.scheduledPost.groupBy({ by: ['type'], where: whereNoType, _count: { _all: true } }),
+    prisma.scheduledPost.findFirst({
+      where: whereNext,
+      orderBy: [{ scheduledFor: 'asc' }, { id: 'asc' }],
+      select: {
+        id: true,
+        scheduledFor: true,
+        type: true,
+        instagramAccount: { select: { id: true, username: true } },
+      },
+    }),
+  ]);
+
+  return {
+    byStatus: Object.fromEntries(byStatusRows.map((r) => [r.status, r._count._all])),
+    byType: Object.fromEntries(byTypeRows.map((r) => [r.type, r._count._all])),
+    nextScheduled: next
+      ? {
+          postId: next.id,
+          scheduledFor: next.scheduledFor,
+          type: next.type,
+          username: next.instagramAccount?.username || null,
+          instagramAccountId: next.instagramAccount?.id || null,
+        }
+      : null,
+  };
+}
+
+/** Ids matching a filter ("selecionar todos os filtrados"), capped. */
+async function findIdsByFilter(userId, filters = {}, limit = 2000) {
+  const rows = await prisma.scheduledPost.findMany({
+    where: buildPostFilterWhere(userId, filters),
+    orderBy: orderForStatus(filters.status),
+    take: limit,
+    select: { id: true },
+  });
+  return rows.map((r) => r.id);
+}
+
+/** Full rows for a bulk action — never returns another user's posts. */
+function findManyByIdsForUser(ids, userId) {
+  return prisma.scheduledPost.findMany({
+    where: { id: { in: ids }, userId },
+    include: POST_INCLUDE,
+  });
+}
+
 module.exports = {
   create,
   findById,
@@ -587,4 +697,9 @@ module.exports = {
   deferPost,
   requeueNow,
   requeueMany,
+  // Rodada 6
+  findPageFiltered,
+  getOverview,
+  findIdsByFilter,
+  findManyByIdsForUser,
 };

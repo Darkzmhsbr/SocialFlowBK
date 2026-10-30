@@ -212,3 +212,33 @@ const publishBatchNow = async (req, res) => {
 
 module.exports.publishNow = publishNow;
 module.exports.publishBatchNow = publishBatchNow;
+
+// --- Rodada 6: Agendamentos page ------------------------------------------
+
+// GET /api/posts/query?status=&types=REEL,STORY&accountId=&q=&take=&skip=
+// Returns { posts, total, take, skip }
+const queryPosts = async (req, res) => {
+  const take = Math.min(Number(req.query.take) || 50, 100);
+  const skip = Number(req.query.skip) || 0;
+  const { posts, total } = await postService.queryPosts(req.userId, req.query, { take, skip });
+  return ok(res, { posts: posts.map(postService.toPublicShape), total, take, skip });
+};
+
+// GET /api/posts/overview?types=&accountId=&q=&status=
+// Returns { byStatus, byType, nextScheduled }
+const getPostsOverview = async (req, res) => {
+  const overview = await postService.getPostsOverview(req.userId, req.query);
+  return ok(res, overview);
+};
+
+// POST /api/posts/bulk
+// Body: { action: 'delete'|'archive'|'publish-now', ids?: string[],
+//         filter?: { status, types, accountId, q }, intervalMinutes?, windowMinutes? }
+const bulkPosts = async (req, res) => {
+  const result = await postService.bulkAction(req.userId, req.body || {});
+  return ok(res, { result });
+};
+
+module.exports.queryPosts = queryPosts;
+module.exports.getPostsOverview = getPostsOverview;
+module.exports.bulkPosts = bulkPosts;

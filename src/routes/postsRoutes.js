@@ -22,6 +22,12 @@ router.post('/batch/:batchId/archive', asyncHandler(controller.archiveBatch));
 router.post('/batch/:batchId/publish-now', asyncHandler(controller.publishBatchNow));
 router.delete('/batch/:batchId', asyncHandler(controller.deleteBatch));
 
+// Rodada 6: Agendamentos page. Declared before /:id so "query"/"overview"
+// are never read as post ids.
+router.get('/query', asyncHandler(controller.queryPosts));
+router.get('/overview', asyncHandler(controller.getPostsOverview));
+router.post('/bulk', asyncHandler(controller.bulkPosts));
+
 // NOTE: /:id/insights must be declared BEFORE the bare /:id route, or
 // Express would match ":id" with the literal string "insights" as the id.
 // Same ordering issue we solved in instagramRoutes for /accounts/:id/status.

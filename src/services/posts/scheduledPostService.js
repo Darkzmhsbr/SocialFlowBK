@@ -1035,6 +1035,152 @@ async function publishBatchNow(batchId, userId, { intervalMinutes, windowMinutes
   };
 }
 
+// -----------------------------------------------------------------------
+// Rodada 6: Agendamentos page
+// -----------------------------------------------------------------------
+
+const BULK_MAX_POSTS = 2000;
+const BULK_ACTIONS = new Set(['delete', 'archive', 'publish-now']);
+
+/**
+ * Validates/normalizes the filters sent by the page (query string or body).
+ * Unknown types are ignored; an invalid status is a 400 (same as listPosts).
+ */
+function normalizeListFilters(raw = {}) {
+  const status = raw.status || undefined;
+  if (status && !isValidStatus(status)) {
+    throw new AppError(ErrorCodes.VALIDATION_ERROR, `Filtro de status inválido: ${status}.`, 400);
+  }
+  const typesInput = Array.isArray(raw.types) ? raw.types : String(raw.types || '').split(',');
+  const types = typesInput.map((t) => String(t).trim()).filter((t) => VALID_TYPES.includes(t));
+  return {
+    status,
+    instagramAccountId: raw.accountId || raw.instagramAccountId || undefined,
+    types: types.length > 0 ? types : undefined,
+    q: raw.q ? String(raw.q).slice(0, 100) : undefined,
+  };
+}
+
+async function queryPosts(userId, rawFilters, { take = 50, skip = 0 } = {}) {
+  const filters = normalizeListFilters(rawFilters);
+  return postRepository.findPageFiltered(userId, filters, { take, skip });
+}
+
+async function getPostsOverview(userId, rawFilters) {
+  const filters = normalizeListFilters(rawFilters);
+  return postRepository.getOverview(userId, filters);
+}
+
+/**
+ * One action on many posts: by explicit ids (checkboxes) or by filter
+ * ("selecionar todos os filtrados").
+ *   delete       - skips QUEUED/PUBLISHING; orphan media check runs once
+ *   archive      - skips QUEUED/PUBLISHING/ARCHIVED
+ *   publish-now  - DRAFT/SCHEDULED/FAILED of ACTIVE profiles, re-staggered
+ *                  per profile (intervalMinutes between posts of the same
+ *                  profile, profiles spread over windowMinutes)
+ * Returns { action, matched, affected, skipped }.
+ */
+async function bulkAction(userId, { action, ids, filter, intervalMinutes, windowMinutes } = {}) {
+  if (!BULK_ACTIONS.has(action)) {
+    throw new AppError(ErrorCodes.VALIDATION_ERROR, `Ação inválida: ${action}.`, 400);
+  }
+
+  let targetIds;
+  if (Array.isArray(ids) && ids.length > 0) {
+    targetIds = [...new Set(ids.map(String))];
+  } else if (filter && typeof filter === 'object') {
+    targetIds = await postRepository.findIdsByFilter(userId, normalizeListFilters(filter), BULK_MAX_POSTS + 1);
+  } else {
+    throw new AppError(ErrorCodes.VALIDATION_ERROR, 'Selecione pelo menos um post.', 400);
+  }
+
+  if (targetIds.length === 0) {
+    throw new AppError(ErrorCodes.VALIDATION_ERROR, 'Nenhum post encontrado com esses filtros.', 400);
+  }
+  if (targetIds.length > BULK_MAX_POSTS) {
+    throw new AppError(
+      ErrorCodes.BATCH_LIMIT_EXCEEDED,
+      `Máximo de ${BULK_MAX_POSTS} posts por ação em massa. Refine os filtros.`,
+      400
+    );
+  }
+
+  const posts = await postRepository.findManyByIdsForUser(targetIds, userId);
+  const matched = posts.length;
+
+  if (action === 'delete') {
+    const deletable = posts.filter((p) => !UNDELETABLE_STATUSES.has(p.status));
+    const mediaAssetIds = new Set();
+    for (const post of deletable) {
+      for (const pm of post.medias || []) {
+        const mediaId = pm.mediaAssetId ?? pm.mediaAsset?.id;
+        if (mediaId) mediaAssetIds.add(mediaId);
+      }
+      if (post.coverMediaAssetId) mediaAssetIds.add(post.coverMediaAssetId);
+    }
+    const { count } = deletable.length
+      ? await postRepository.deleteManyByIds(deletable.map((p) => p.id))
+      : { count: 0 };
+
+    for (const mediaId of mediaAssetIds) {
+      mediaService.deleteIfOrphan(mediaId, userId).catch((err) => {
+        logger.warn('Orphan media cleanup rejected unexpectedly', { mediaId, userId, error: err.message });
+      });
+    }
+    logger.info('Bulk delete', { userId, matched, deleted: count });
+    return { action, matched, affected: count, skipped: matched - count };
+  }
+
+  if (action === 'archive') {
+    const archivable = posts
+      .filter((p) => !['QUEUED', 'PUBLISHING', 'ARCHIVED'].includes(p.status))
+      .map((p) => p.id);
+    const { count } = archivable.length ? await postRepository.archiveManyByIds(archivable) : { count: 0 };
+    logger.info('Bulk archive', { userId, matched, archived: count });
+    return { action, matched, affected: count, skipped: matched - count };
+  }
+
+  // publish-now
+  const eligible = posts.filter(
+    (p) => PUBLISH_NOW_STATUSES.has(p.status) && p.instagramAccount?.status === 'ACTIVE'
+  );
+  if (eligible.length === 0) {
+    throw new AppError(
+      ErrorCodes.POST_INVALID_STATE,
+      'Nenhum dos posts selecionados pode ser publicado agora (já publicados, em publicação ou de perfis com problema).',
+      409
+    );
+  }
+
+  const interval = clampNumber(intervalMinutes, 0, 1440, env.batch.defaultItemIntervalMinutes);
+  const window = clampNumber(windowMinutes, 0, 720, 10);
+  const byAccount = new Map();
+  for (const post of eligible) {
+    if (!byAccount.has(post.instagramAccountId)) byAccount.set(post.instagramAccountId, []);
+    byAccount.get(post.instagramAccountId).push(post);
+  }
+  const accountIds = shuffle([...byAccount.keys()]);
+  const slotMs = accountIds.length > 0 ? (window * 60 * 1000) / accountIds.length : 0;
+  const startMs = Date.now() + 5000;
+  const entries = [];
+  accountIds.forEach((accountId, k) => {
+    const list = byAccount.get(accountId).sort((a, b) => {
+      const ta = a.scheduledFor ? new Date(a.scheduledFor).getTime() : 0;
+      const tb = b.scheduledFor ? new Date(b.scheduledFor).getTime() : 0;
+      return ta - tb || new Date(a.createdAt) - new Date(b.createdAt);
+    });
+    const baseMs = startMs + Math.floor(k * slotMs) + Math.floor(Math.random() * slotMs * 0.8);
+    list.forEach((post, j) => {
+      entries.push({ id: post.id, scheduledFor: new Date(baseMs + j * interval * 60 * 1000) });
+    });
+  });
+
+  const requeued = await postRepository.requeueMany(entries);
+  logger.info('Bulk publish-now', { userId, matched, requeued, intervalMinutes: interval });
+  return { action, matched, affected: requeued, skipped: matched - requeued };
+}
+
 module.exports = {
   createPost,
   listPosts,
@@ -1056,4 +1202,8 @@ module.exports = {
   // Rodada 5
   publishNow,
   publishBatchNow,
+  // Rodada 6
+  queryPosts,
+  getPostsOverview,
+  bulkAction,
 };
