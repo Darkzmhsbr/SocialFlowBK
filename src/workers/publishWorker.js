@@ -39,6 +39,9 @@ const accountHealthService = require('../services/instagram/accountHealthService
 const cleanupService = require('../services/cleanup/cleanupService');
 // Rodada 13: daily metrics collection for the Dashboard.
 const metricsService = require('../services/metrics/metricsService');
+// Rodada 17: Monitoramento (alerts) + official Telegram alerts bot.
+const monitoringService = require('../services/monitoring/monitoringService');
+const telegramService = require('../services/telegram/telegramService');
 
 let isTicking = false;
 let task = null;
@@ -212,6 +215,9 @@ function start() {
   cleanupService.startRunner();
   // Rodada 13
   metricsService.startCollector();
+  // Rodada 17
+  monitoringService.startMonitor();
+  telegramService.start().catch(() => {});
 }
 
 function stop() {
@@ -226,6 +232,9 @@ function stop() {
   cleanupService.stopRunner();
   // Rodada 13
   metricsService.stopCollector();
+  // Rodada 17
+  monitoringService.stopMonitor();
+  telegramService.stop();
 }
 
 module.exports = { start, stop, tick };

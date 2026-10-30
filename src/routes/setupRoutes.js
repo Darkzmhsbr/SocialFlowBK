@@ -1160,6 +1160,136 @@ async function migrateRodada16Templates(req, res) {
 router.get('/migrate-rodada16-templates', migrateRodada16Templates);
 router.post('/migrate-rodada16-templates', migrateRodada16Templates);
 
+// GET  /api/setup/migrate-rodada17-monitoring?token=SEU_TOKEN   (pelo navegador)
+// POST /api/setup/migrate-rodada17-monitoring?token=SEU_TOKEN   (curl/Postman)
+//
+// Rodada 17 (Monitoramento + alertas no Telegram) schema migration:
+//   - telegram_links: new table (PK userId) + FK users (CASCADE) +
+//     unique linkCode + index chatId
+// Names match what Prisma generates for schema.prisma (no drift).
+// Run RIGHT AFTER the backend deploy goes Active. Idempotent,
+// transactional, existing data untouched.
+const RODADA17_INDEXES = ['telegram_links_linkCode_key', 'telegram_links_chatId_idx'];
+
+async function migrateRodada17Monitoring(req, res) {
+  if (!assertSetupToken(req, res)) return;
+
+  try {
+    const before = await inspectRodada17Schema();
+    if (before.table && before.missingIndexes.length === 0 && before.foreignKey) {
+      return res.json({
+        success: true,
+        data: {
+          applied: { tablesCreated: [], indexesCreated: [], foreignKeyCreated: false },
+          schema: before,
+          message: 'Nada a migrar. Monitoramento e alertas do Telegram já existem.',
+        },
+      });
+    }
+
+    await prisma.$transaction([
+      prisma.$executeRawUnsafe(
+        'CREATE TABLE IF NOT EXISTS "telegram_links" (' +
+          '"userId" TEXT NOT NULL, ' +
+          '"status" TEXT NOT NULL DEFAULT \'PENDING\', ' +
+          '"chatId" TEXT, ' +
+          '"chatType" TEXT, ' +
+          '"title" TEXT, ' +
+          '"chatUsername" TEXT, ' +
+          '"linkCode" TEXT, ' +
+          '"linkCodeExpiresAt" TIMESTAMP(3), ' +
+          '"pendingChatId" TEXT, ' +
+          '"pendingTitle" TEXT, ' +
+          '"pendingType" TEXT, ' +
+          '"pendingUsername" TEXT, ' +
+          '"verifyCode" TEXT, ' +
+          '"verifyMessageId" INTEGER, ' +
+          '"verifyExpiresAt" TIMESTAMP(3), ' +
+          '"verifyAttempts" INTEGER NOT NULL DEFAULT 0, ' +
+          '"alertTypes" JSONB, ' +
+          '"lastSentAt" TIMESTAMP(3), ' +
+          '"lastError" TEXT, ' +
+          '"lastErrorAt" TIMESTAMP(3), ' +
+          '"lastDailySummaryAt" TIMESTAMP(3), ' +
+          '"createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP, ' +
+          '"updatedAt" TIMESTAMP(3) NOT NULL, ' +
+          'CONSTRAINT "telegram_links_pkey" PRIMARY KEY ("userId")' +
+          ')'
+      ),
+      prisma.$executeRawUnsafe(
+        'CREATE UNIQUE INDEX IF NOT EXISTS "telegram_links_linkCode_key" ON "telegram_links"("linkCode")'
+      ),
+      prisma.$executeRawUnsafe(
+        'CREATE INDEX IF NOT EXISTS "telegram_links_chatId_idx" ON "telegram_links"("chatId")'
+      ),
+      prisma.$executeRawUnsafe(
+        'DO $$ BEGIN ' +
+          'IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = \'telegram_links_userId_fkey\') THEN ' +
+          'ALTER TABLE "telegram_links" ADD CONSTRAINT "telegram_links_userId_fkey" ' +
+          'FOREIGN KEY ("userId") REFERENCES "users"("id") ON DELETE CASCADE ON UPDATE CASCADE; ' +
+          'END IF; END $$;'
+      ),
+    ]);
+
+    const after = await inspectRodada17Schema();
+    const applied = {
+      tablesCreated: !before.table && after.table ? ['telegram_links'] : [],
+      indexesCreated: before.missingIndexes.filter((i) => !after.missingIndexes.includes(i)),
+      foreignKeyCreated: !before.foreignKey && after.foreignKey,
+    };
+
+    logger.info('Rodada 17 monitoring migration applied', { applied, schema: after });
+
+    return res.json({
+      success: true,
+      data: {
+        applied,
+        schema: after,
+        message: 'Migração Rodada 17 concluída. Monitoramento e alertas do Telegram liberados - pode publicar o frontend.',
+      },
+    });
+  } catch (error) {
+    logger.error('Failed to apply Rodada 17 monitoring migration', {
+      message: error.message,
+      code: error.code,
+      meta: error.meta,
+    });
+    return res.status(500).json({
+      success: false,
+      error: {
+        code: error.code || 'PRISMA_ERROR',
+        message: error.message,
+        details: error.meta || null,
+      },
+    });
+  }
+}
+
+router.get('/migrate-rodada17-monitoring', migrateRodada17Monitoring);
+router.post('/migrate-rodada17-monitoring', migrateRodada17Monitoring);
+
+async function inspectRodada17Schema() {
+  const [table] = await prisma.$queryRaw`
+    SELECT EXISTS (
+      SELECT 1 FROM information_schema.tables
+      WHERE table_schema = current_schema() AND table_name = 'telegram_links'
+    ) AS "exists"
+  `;
+  const indexes = await prisma.$queryRaw`
+    SELECT indexname::text AS indexname FROM pg_indexes
+    WHERE schemaname = current_schema() AND tablename = 'telegram_links'
+  `;
+  const [fk] = await prisma.$queryRaw`
+    SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'telegram_links_userId_fkey') AS "exists"
+  `;
+  const presentIndexes = new Set(indexes.map((i) => i.indexname));
+  return {
+    table: Boolean(table?.exists),
+    missingIndexes: RODADA17_INDEXES.filter((i) => !presentIndexes.has(i)),
+    foreignKey: Boolean(fk?.exists),
+  };
+}
+
 async function inspectRodada16Schema() {
   const [table] = await prisma.$queryRaw`
     SELECT EXISTS (

@@ -55,6 +55,9 @@ async function notify(n) {
       },
     });
     logger.info('Notification created', { userId: n.userId, type: n.type, notificationId: created.id });
+    // Rodada 17: same alert on Telegram (if the user linked it). Lazy
+    // require avoids a circular import; enqueue() never throws.
+    require('../telegram/telegramService').enqueue(created);
     return created;
   } catch (err) {
     logger.warn('Notification create failed (ignored)', { type: n?.type, error: err.message });

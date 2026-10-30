@@ -159,6 +159,15 @@ const env = {
   // Rodada 5 - periodic account health check (detects banned/restricted
   // accounts and expired tokens even with nothing scheduled) + automatic
   // long-lived token refresh before it expires.
+  // Rodada 17 - official alerts bot (one bot for the whole platform; each
+  // user links their own chat/group/channel). Empty token = alerts off.
+  telegram: {
+    botToken: process.env.TELEGRAM_BOT_TOKEN || null,
+    // Optional: forces the webhook secret (default: derived from the token).
+    webhookSecret: process.env.TELEGRAM_WEBHOOK_SECRET || null,
+    apiBaseUrl: process.env.TELEGRAM_API_BASE_URL || 'https://api.telegram.org',
+  },
+
   health: {
     enabled: bool('ACCOUNT_HEALTH_ENABLED', true),
     runEveryMinutes: Number(process.env.ACCOUNT_HEALTH_RUN_MINUTES) || 5,

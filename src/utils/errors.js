@@ -99,6 +99,10 @@ const ErrorCodes = {
   TEMPLATE_NOT_FOUND: 'TEMPLATE_NOT_FOUND',
   TEMPLATE_INVALID: 'TEMPLATE_INVALID',
   POST_MEDIA_PURGED: 'POST_MEDIA_PURGED',
+
+  // Rodada 17 - monitoring / Telegram alerts
+  TELEGRAM_NOT_CONFIGURED: 'TELEGRAM_NOT_CONFIGURED',
+  TELEGRAM_INVALID: 'TELEGRAM_INVALID',
 };
 
 module.exports = { AppError, ErrorCodes };

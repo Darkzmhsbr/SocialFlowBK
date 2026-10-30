@@ -134,6 +134,9 @@ model User {
   // Rodada 16: reusable post templates
   postTemplates PostTemplate[]
 
+  // Rodada 17: where this user's alerts go on Telegram
+  telegramLink TelegramLink?
+
   @@map("users")
 }
 
@@ -552,4 +555,42 @@ model PostTemplate {
   @@index([userId])
   @@index([accountFolderId])
   @@map("post_templates")
+}
+
+// Rodada 17: one Telegram destination per user (private chat, group or
+// channel) for the official alerts bot.
+//   status: PENDING (code generated, nothing linked) | VERIFYING (channel
+//           informed by ID, waiting for the 6-digit code posted there) |
+//           ACTIVE | BROKEN (bot removed / no permission)
+//   linkCode     : "SF-XXXXXX" for /start, group start or a channel post
+//   pending*     : channel informed by ID, until the code is confirmed
+//   alertTypes   : enabled alert types (null = defaults)
+model TelegramLink {
+  userId              String    @id
+  user                User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  status              String    @default("PENDING")
+  chatId              String?
+  chatType            String?
+  title               String?
+  chatUsername        String?
+  linkCode            String?   @unique
+  linkCodeExpiresAt   DateTime?
+  pendingChatId       String?
+  pendingTitle        String?
+  pendingType         String?
+  pendingUsername     String?
+  verifyCode          String?
+  verifyMessageId     Int?
+  verifyExpiresAt     DateTime?
+  verifyAttempts      Int       @default(0)
+  alertTypes          Json?
+  lastSentAt          DateTime?
+  lastError           String?   @db.Text
+  lastErrorAt         DateTime?
+  lastDailySummaryAt  DateTime?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  @@index([chatId])
+  @@map("telegram_links")
 }

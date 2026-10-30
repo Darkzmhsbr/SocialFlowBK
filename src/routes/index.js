@@ -17,6 +17,9 @@ const cleanupRoutes = require('./cleanupRoutes');
 const metricsRoutes = require('./metricsRoutes');
 // Rodada 16
 const templatesRoutes = require('./templatesRoutes');
+// Rodada 17
+const monitoringRoutes = require('./monitoringRoutes');
+const telegramRoutes = require('./telegramRoutes');
 
 const router = Router();
 
@@ -33,5 +36,7 @@ router.use('/admin', adminRoutes); // -> /api/admin/* (Rodada 11)
 router.use('/cleanup', cleanupRoutes); // -> /api/cleanup/* (Rodada 12)
 router.use('/metrics', metricsRoutes); // -> /api/metrics/* (Rodada 13)
 router.use('/templates', templatesRoutes); // -> /api/templates/* (Rodada 16)
+router.use('/monitoring', monitoringRoutes); // -> /api/monitoring/* (Rodada 17)
+router.use('/telegram', telegramRoutes); // -> /api/telegram/* (Rodada 17)
 
 module.exports = router;
