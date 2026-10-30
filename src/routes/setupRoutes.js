@@ -711,6 +711,143 @@ async function migrateRodada8AccountFolders(req, res) {
 router.get('/migrate-rodada8-account-folders', migrateRodada8AccountFolders);
 router.post('/migrate-rodada8-account-folders', migrateRodada8AccountFolders);
 
+// GET  /api/setup/migrate-rodada10-meta-app?token=SEU_TOKEN   (pelo navegador)
+// POST /api/setup/migrate-rodada10-meta-app?token=SEU_TOKEN   (curl/Postman)
+//
+// Rodada 10 (own Meta app per user) schema migration:
+//   - meta_app_credentials: new table, unique (userId), FK users (CASCADE)
+//   - instagram_accounts."metaAppCredentialId" TEXT + FK (ON DELETE SET NULL)
+//     + index. Existing profiles stay NULL = default app (nothing changes
+//     for them).
+// Names match what Prisma generates for schema.prisma (no drift).
+// Run RIGHT AFTER the backend deploy goes Active. Idempotent,
+// transactional, existing data untouched.
+const RODADA10_INDEXES = ['meta_app_credentials_userId_key', 'instagram_accounts_metaAppCredentialId_idx'];
+
+async function migrateRodada10MetaApp(req, res) {
+  if (!assertSetupToken(req, res)) return;
+
+  try {
+    const before = await inspectRodada10Schema();
+    if (before.table && before.column && before.foreignKey && before.missingIndexes.length === 0) {
+      return res.json({
+        success: true,
+        data: {
+          applied: { tableCreated: false, columnAdded: false, foreignKeyCreated: false, indexesCreated: [] },
+          schema: before,
+          message: 'Nada a migrar. App Meta próprio já está configurado no banco.',
+        },
+      });
+    }
+
+    await prisma.$transaction([
+      prisma.$executeRawUnsafe(
+        'CREATE TABLE IF NOT EXISTS "meta_app_credentials" (' +
+          '"id" TEXT NOT NULL, ' +
+          '"userId" TEXT NOT NULL, ' +
+          '"appId" TEXT NOT NULL, ' +
+          '"appSecretEncrypted" TEXT NOT NULL, ' +
+          '"status" TEXT NOT NULL DEFAULT \'PENDING\', ' +
+          '"verifiedAt" TIMESTAMP(3), ' +
+          '"lastErrorMessage" TEXT, ' +
+          '"lastErrorAt" TIMESTAMP(3), ' +
+          '"createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP, ' +
+          '"updatedAt" TIMESTAMP(3) NOT NULL, ' +
+          'CONSTRAINT "meta_app_credentials_pkey" PRIMARY KEY ("id"), ' +
+          'CONSTRAINT "meta_app_credentials_userId_fkey" FOREIGN KEY ("userId") ' +
+          'REFERENCES "users"("id") ON DELETE CASCADE ON UPDATE CASCADE' +
+          ')'
+      ),
+      prisma.$executeRawUnsafe(
+        'CREATE UNIQUE INDEX IF NOT EXISTS "meta_app_credentials_userId_key" ON "meta_app_credentials"("userId")'
+      ),
+      prisma.$executeRawUnsafe(
+        'ALTER TABLE "instagram_accounts" ADD COLUMN IF NOT EXISTS "metaAppCredentialId" TEXT'
+      ),
+      prisma.$executeRawUnsafe(
+        'DO $$ BEGIN ' +
+          'IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = \'instagram_accounts_metaAppCredentialId_fkey\') THEN ' +
+          'ALTER TABLE "instagram_accounts" ADD CONSTRAINT "instagram_accounts_metaAppCredentialId_fkey" ' +
+          'FOREIGN KEY ("metaAppCredentialId") REFERENCES "meta_app_credentials"("id") ON DELETE SET NULL ON UPDATE CASCADE; ' +
+          'END IF; END $$'
+      ),
+      prisma.$executeRawUnsafe(
+        'CREATE INDEX IF NOT EXISTS "instagram_accounts_metaAppCredentialId_idx" ON "instagram_accounts"("metaAppCredentialId")'
+      ),
+    ]);
+
+    const after = await inspectRodada10Schema();
+    const applied = {
+      tableCreated: !before.table && after.table,
+      columnAdded: !before.column && after.column,
+      foreignKeyCreated: !before.foreignKey && after.foreignKey,
+      indexesCreated: before.missingIndexes.filter((i) => !after.missingIndexes.includes(i)),
+    };
+
+    logger.info('Rodada 10 meta app migration applied', { applied, schema: after });
+
+    return res.json({
+      success: true,
+      data: {
+        applied,
+        schema: after,
+        message: 'Migração Rodada 10 concluída. App Meta próprio liberado - pode publicar o frontend.',
+      },
+    });
+  } catch (error) {
+    logger.error('Failed to apply Rodada 10 meta app migration', {
+      message: error.message,
+      code: error.code,
+      meta: error.meta,
+    });
+    return res.status(500).json({
+      success: false,
+      error: {
+        code: error.code || 'PRISMA_ERROR',
+        message: error.message,
+        details: error.meta || null,
+      },
+    });
+  }
+}
+
+router.get('/migrate-rodada10-meta-app', migrateRodada10MetaApp);
+router.post('/migrate-rodada10-meta-app', migrateRodada10MetaApp);
+
+async function inspectRodada10Schema() {
+  const [table] = await prisma.$queryRaw`
+    SELECT EXISTS (
+      SELECT 1 FROM information_schema.tables
+      WHERE table_schema = current_schema() AND table_name = 'meta_app_credentials'
+    ) AS "exists"
+  `;
+  const [column] = await prisma.$queryRaw`
+    SELECT EXISTS (
+      SELECT 1 FROM information_schema.columns
+      WHERE table_schema = current_schema()
+        AND table_name = 'instagram_accounts'
+        AND column_name = 'metaAppCredentialId'
+    ) AS "exists"
+  `;
+  const [fk] = await prisma.$queryRaw`
+    SELECT EXISTS (
+      SELECT 1 FROM pg_constraint WHERE conname = 'instagram_accounts_metaAppCredentialId_fkey'
+    ) AS "exists"
+  `;
+  const indexes = await prisma.$queryRaw`
+    SELECT indexname FROM pg_indexes
+    WHERE schemaname = current_schema()
+      AND tablename IN ('meta_app_credentials', 'instagram_accounts')
+  `;
+  const presentIndexes = new Set(indexes.map((i) => i.indexname));
+  return {
+    table: Boolean(table?.exists),
+    column: Boolean(column?.exists),
+    foreignKey: Boolean(fk?.exists),
+    missingIndexes: RODADA10_INDEXES.filter((i) => !presentIndexes.has(i)),
+  };
+}
+
 async function inspectRodada8Schema() {
   const tables = await prisma.$queryRaw`
     SELECT table_name FROM information_schema.tables

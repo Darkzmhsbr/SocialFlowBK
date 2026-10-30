@@ -26,6 +26,12 @@
 // Please make sure your redirect_uri is identical..." even when the redirect_uri
 // is byte-for-byte correct. Use FormData and let axios set the Content-Type
 // with the proper multipart boundary.
+//
+// Rodada 10: the 3 OAuth calls below accept an optional `app`
+// ({ appId, appSecret }) — the user's own Instagram app. Without it, the
+// server's default app (META_APP_ID / META_APP_SECRET) is used, exactly as
+// before. Every other call only uses the account's access token, which
+// already belongs to the app that created it.
 
 const axios = require('axios');
 const env = require('../../config/env');
@@ -43,9 +49,9 @@ function apiBase() {
     : igConfig.apiBaseUrl;
 }
 
-function buildAuthorizationUrl(state) {
+function buildAuthorizationUrl(state, app = null) { // Rodada 10: was (state)
   const params = new URLSearchParams({
-    client_id: metaConfig.appId,
+    client_id: app?.appId || metaConfig.appId, // Rodada 10: was metaConfig.appId
     redirect_uri: metaConfig.redirectUri,
     response_type: 'code',
     scope: igConfig.scopes,
@@ -55,18 +61,19 @@ function buildAuthorizationUrl(state) {
   console.log('========== INSTAGRAM AUTHORIZE URL ==========');
   console.log('AUTHORIZE HOST:', igConfig.oauthAuthorizeUrl);
   console.log('REDIRECT URI IN AUTHORIZE:', metaConfig.redirectUri);
+  console.log('APP USED:', app?.appId ? `own app ${app.appId}` : 'default app'); // Rodada 10
   console.log('=============================================');
   return url;
 }
 
-async function exchangeCodeForShortLivedToken(code) {
+async function exchangeCodeForShortLivedToken(code, app = null) { // Rodada 10: was (code)
   try {
     // Meta's token endpoint expects multipart/form-data, NOT
     // application/x-www-form-urlencoded. See the comment at the top of this
     // file for the (poorly documented) reason.
     const form = new FormData();
-    form.append('client_id', metaConfig.appId);
-    form.append('client_secret', metaConfig.appSecret);
+    form.append('client_id', app?.appId || metaConfig.appId); // Rodada 10
+    form.append('client_secret', app?.appSecret || metaConfig.appSecret); // Rodada 10
     form.append('grant_type', 'authorization_code');
     form.append('redirect_uri', metaConfig.redirectUri);
     form.append('code', code);
@@ -102,12 +109,12 @@ async function exchangeCodeForShortLivedToken(code) {
   }
 }
 
-async function exchangeForLongLivedToken(shortLivedToken) {
+async function exchangeForLongLivedToken(shortLivedToken, app = null) { // Rodada 10: was (shortLivedToken)
   try {
     const { data } = await axios.get(`${igConfig.apiBaseUrl}/access_token`, {
       params: {
         grant_type: 'ig_exchange_token',
-        client_secret: metaConfig.appSecret,
+        client_secret: app?.appSecret || metaConfig.appSecret, // Rodada 10
         access_token: shortLivedToken,
       },
       timeout: 10000,

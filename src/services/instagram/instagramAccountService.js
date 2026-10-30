@@ -6,7 +6,8 @@ const logger = require('../../utils/logger');
 
 const PROFESSIONAL_ACCOUNT_TYPES = ['BUSINESS', 'MEDIA_CREATOR'];
 
-async function connectAndStoreAccount({ userId, accessToken, tokenExpiresAt }) {
+// Rodada 10: metaAppCredentialId = app used to connect (null = default app).
+async function connectAndStoreAccount({ userId, accessToken, tokenExpiresAt, metaAppCredentialId = null }) {
   const profile = await instagramApiClient.fetchAuthorizedProfile(accessToken);
   logger.info('Instagram account retrieved', { instagramUserId: profile.id });
 
@@ -27,6 +28,7 @@ async function connectAndStoreAccount({ userId, accessToken, tokenExpiresAt }) {
     accountType: profile.account_type || null,
     accessTokenEncrypted: encryptToken(accessToken),
     tokenExpiresAt,
+    metaAppCredentialId, // Rodada 10
   });
 
   logger.info('Instagram account saved', { accountId: account.id });

@@ -13,6 +13,7 @@ function upsertByInstagramUserId({
   accountType,
   accessTokenEncrypted,
   tokenExpiresAt,
+  metaAppCredentialId = null, // Rodada 10
 }) {
   return prisma.instagramAccount.upsert({
     where: { instagramUserId },
@@ -34,6 +35,8 @@ function upsertByInstagramUserId({
       lastErrorMessage: null,
       lastErrorAt: null,
       lastHealthCheckAt: new Date(),
+      // Rodada 10: reconnecting through another app switches the profile to it
+      metaAppCredentialId,
     },
     create: {
       userId,
@@ -45,6 +48,7 @@ function upsertByInstagramUserId({
       accessTokenEncrypted,
       tokenExpiresAt,
       lastSyncAt: new Date(),
+      metaAppCredentialId, // Rodada 10
     },
   });
 }

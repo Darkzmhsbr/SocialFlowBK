@@ -83,6 +83,9 @@ const ErrorCodes = {
 
   // Rodada 8 - profile folders
   ACCOUNT_FOLDER_NOT_FOUND: 'ACCOUNT_FOLDER_NOT_FOUND',
+
+  // Rodada 10 - own Meta app
+  META_APP_INVALID: 'META_APP_INVALID',
 };
 
 module.exports = { AppError, ErrorCodes };

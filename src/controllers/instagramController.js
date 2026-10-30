@@ -5,6 +5,8 @@ const accountStatusService = require('../services/instagram/accountStatusService
 const { ok, fail } = require('../utils/apiResponse');
 const { AppError, ErrorCodes } = require('../utils/errors');
 const logger = require('../utils/logger');
+// Rodada 10: own Meta app per user.
+const metaAppService = require('../services/instagram/metaAppService');
 
 // GET /api/instagram/authorize-url  (requires auth)
 // Returns { url } for the frontend to redirect to. Replaces the old
@@ -12,7 +14,7 @@ const logger = require('../utils/logger');
 // work anymore because the browser navigation drops the Bearer token,
 // so the server had no way to know who started the flow.
 const getAuthorizeUrl = async (req, res) => {
-  const { url } = authService.startOAuthFlow(req.userId);
+  const { url } = await authService.startOAuthFlow(req.userId); // Rodada 10: now async
   return ok(res, { url });
 };
 
@@ -35,16 +37,30 @@ const handleCallback = async (req, res) => {
     return res.redirect(`${env.frontendUrl}/dashboard?instagram=denied`);
   }
 
+  // Rodada 10: which app started this flow (null = default app).
+  let stateInfo = null;
   try {
-    const { userId } = authService.consumeState(state);
+    stateInfo = authService.consumeState(state); // Rodada 10: was const { userId } = ...
+    const { userId } = stateInfo;
     if (!code) {
       throw new AppError(ErrorCodes.INVALID_CODE, 'Código de autorização ausente.', 400);
     }
 
     logger.info('Instagram OAuth callback received', { requestId: req.requestId });
 
-    const { accessToken, tokenExpiresAt } = await authService.completeOAuthFlow(code);
-    await accountService.connectAndStoreAccount({ userId, accessToken, tokenExpiresAt });
+    const { accessToken, tokenExpiresAt } = await authService.completeOAuthFlow(code, {
+      metaAppCredentialId: stateInfo.metaAppCredentialId,
+    }); // Rodada 10: was completeOAuthFlow(code)
+    await accountService.connectAndStoreAccount({
+      userId,
+      accessToken,
+      tokenExpiresAt,
+      metaAppCredentialId: stateInfo.metaAppCredentialId,
+    }); // Rodada 10: + metaAppCredentialId
+    // Rodada 10: first successful connection proves the user's app works.
+    if (stateInfo.metaAppCredentialId) {
+      await metaAppService.markVerified(stateInfo.metaAppCredentialId);
+    }
 
     return res.redirect(`${env.frontendUrl}/dashboard?instagram=connected`);
   } catch (err) {
@@ -55,6 +71,10 @@ const handleCallback = async (req, res) => {
       requestId: req.requestId,
       message: err.message,
     });
+    // Rodada 10: show the failure on the App Meta page of that user.
+    if (stateInfo?.metaAppCredentialId) {
+      await metaAppService.recordError(stateInfo.metaAppCredentialId, err).catch(() => {});
+    }
     return res.redirect(`${env.frontendUrl}/dashboard?instagram=error`);
   }
 };

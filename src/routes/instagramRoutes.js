@@ -4,6 +4,8 @@ const requireAuth = require('../middleware/requireAuth');
 const controller = require('../controllers/instagramController');
 // Rodada 8: profile folders
 const foldersController = require('../controllers/accountFoldersController');
+// Rodada 10: own Meta app
+const metaAppController = require('../controllers/metaAppController');
 
 const router = Router();
 
@@ -13,6 +15,11 @@ router.get('/callback', asyncHandler(controller.handleCallback));
 // Everything below requires a logged-in user.
 router.get('/authorize-url', requireAuth, asyncHandler(controller.getAuthorizeUrl));
 router.get('/accounts', requireAuth, asyncHandler(controller.listAccounts));
+
+// Rodada 10: own Meta app (/api/instagram/meta-app)
+router.get('/meta-app', requireAuth, asyncHandler(metaAppController.getStatus));
+router.put('/meta-app', requireAuth, asyncHandler(metaAppController.saveCredentials));
+router.delete('/meta-app', requireAuth, asyncHandler(metaAppController.removeCredentials));
 
 // Rodada 8: profile folders (/api/instagram/folders/*)
 router.get('/folders', requireAuth, asyncHandler(foldersController.listFolders));
