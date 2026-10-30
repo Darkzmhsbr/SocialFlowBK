@@ -94,6 +94,11 @@ const ErrorCodes = {
   // Rodada 12 - cleanup
   CLEANUP_JOB_NOT_FOUND: 'CLEANUP_JOB_NOT_FOUND',
   CLEANUP_INVALID: 'CLEANUP_INVALID',
+
+  // Rodada 16 - templates / duplicate post
+  TEMPLATE_NOT_FOUND: 'TEMPLATE_NOT_FOUND',
+  TEMPLATE_INVALID: 'TEMPLATE_INVALID',
+  POST_MEDIA_PURGED: 'POST_MEDIA_PURGED',
 };
 
 module.exports = { AppError, ErrorCodes };

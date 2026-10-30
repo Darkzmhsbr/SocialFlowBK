@@ -1049,6 +1049,141 @@ async function migrateRodada13Metrics(req, res) {
 router.get('/migrate-rodada13-metrics', migrateRodada13Metrics);
 router.post('/migrate-rodada13-metrics', migrateRodada13Metrics);
 
+// GET  /api/setup/migrate-rodada16-templates?token=SEU_TOKEN   (pelo navegador)
+// POST /api/setup/migrate-rodada16-templates?token=SEU_TOKEN   (curl/Postman)
+//
+// Rodada 16 ("Modelos") schema migration:
+//   - post_templates: new table + FK users (CASCADE) + FK account_folders
+//     (SET NULL) + unique (userId, name) + indexes
+// Names match what Prisma generates for schema.prisma (no drift).
+// Run RIGHT AFTER the backend deploy goes Active. Idempotent,
+// transactional, existing data untouched.
+const RODADA16_INDEXES = [
+  'post_templates_userId_name_key',
+  'post_templates_userId_idx',
+  'post_templates_accountFolderId_idx',
+];
+const RODADA16_FKS = ['post_templates_userId_fkey', 'post_templates_accountFolderId_fkey'];
+
+async function migrateRodada16Templates(req, res) {
+  if (!assertSetupToken(req, res)) return;
+
+  try {
+    const before = await inspectRodada16Schema();
+    if (before.table && before.missingIndexes.length === 0 && before.missingForeignKeys.length === 0) {
+      return res.json({
+        success: true,
+        data: {
+          applied: { tablesCreated: [], indexesCreated: [], foreignKeysCreated: [] },
+          schema: before,
+          message: 'Nada a migrar. Os modelos já existem.',
+        },
+      });
+    }
+
+    await prisma.$transaction([
+      prisma.$executeRawUnsafe(
+        'CREATE TABLE IF NOT EXISTS "post_templates" (' +
+          '"id" TEXT NOT NULL, ' +
+          '"userId" TEXT NOT NULL, ' +
+          '"name" TEXT NOT NULL, ' +
+          '"type" TEXT, ' +
+          '"caption" TEXT, ' +
+          '"hashtags" TEXT, ' +
+          '"accountFolderId" TEXT, ' +
+          '"usageCount" INTEGER NOT NULL DEFAULT 0, ' +
+          '"lastUsedAt" TIMESTAMP(3), ' +
+          '"createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP, ' +
+          '"updatedAt" TIMESTAMP(3) NOT NULL, ' +
+          'CONSTRAINT "post_templates_pkey" PRIMARY KEY ("id")' +
+          ')'
+      ),
+      prisma.$executeRawUnsafe(
+        'CREATE UNIQUE INDEX IF NOT EXISTS "post_templates_userId_name_key" ON "post_templates"("userId", "name")'
+      ),
+      prisma.$executeRawUnsafe(
+        'CREATE INDEX IF NOT EXISTS "post_templates_userId_idx" ON "post_templates"("userId")'
+      ),
+      prisma.$executeRawUnsafe(
+        'CREATE INDEX IF NOT EXISTS "post_templates_accountFolderId_idx" ON "post_templates"("accountFolderId")'
+      ),
+      prisma.$executeRawUnsafe(
+        'DO $$ BEGIN ' +
+          'IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = \'post_templates_userId_fkey\') THEN ' +
+          'ALTER TABLE "post_templates" ADD CONSTRAINT "post_templates_userId_fkey" ' +
+          'FOREIGN KEY ("userId") REFERENCES "users"("id") ON DELETE CASCADE ON UPDATE CASCADE; ' +
+          'END IF; END $$;'
+      ),
+      prisma.$executeRawUnsafe(
+        'DO $$ BEGIN ' +
+          'IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = \'post_templates_accountFolderId_fkey\') THEN ' +
+          'ALTER TABLE "post_templates" ADD CONSTRAINT "post_templates_accountFolderId_fkey" ' +
+          'FOREIGN KEY ("accountFolderId") REFERENCES "account_folders"("id") ON DELETE SET NULL ON UPDATE CASCADE; ' +
+          'END IF; END $$;'
+      ),
+    ]);
+
+    const after = await inspectRodada16Schema();
+    const applied = {
+      tablesCreated: !before.table && after.table ? ['post_templates'] : [],
+      indexesCreated: before.missingIndexes.filter((i) => !after.missingIndexes.includes(i)),
+      foreignKeysCreated: before.missingForeignKeys.filter((f) => !after.missingForeignKeys.includes(f)),
+    };
+
+    logger.info('Rodada 16 templates migration applied', { applied, schema: after });
+
+    return res.json({
+      success: true,
+      data: {
+        applied,
+        schema: after,
+        message: 'Migração Rodada 16 concluída. Modelos liberados - pode publicar o frontend.',
+      },
+    });
+  } catch (error) {
+    logger.error('Failed to apply Rodada 16 templates migration', {
+      message: error.message,
+      code: error.code,
+      meta: error.meta,
+    });
+    return res.status(500).json({
+      success: false,
+      error: {
+        code: error.code || 'PRISMA_ERROR',
+        message: error.message,
+        details: error.meta || null,
+      },
+    });
+  }
+}
+
+router.get('/migrate-rodada16-templates', migrateRodada16Templates);
+router.post('/migrate-rodada16-templates', migrateRodada16Templates);
+
+async function inspectRodada16Schema() {
+  const [table] = await prisma.$queryRaw`
+    SELECT EXISTS (
+      SELECT 1 FROM information_schema.tables
+      WHERE table_schema = current_schema() AND table_name = 'post_templates'
+    ) AS "exists"
+  `;
+  const indexes = await prisma.$queryRaw`
+    SELECT indexname::text AS indexname FROM pg_indexes
+    WHERE schemaname = current_schema() AND tablename = 'post_templates'
+  `;
+  const fks = await prisma.$queryRaw`
+    SELECT conname::text AS conname FROM pg_constraint
+    WHERE conname IN ('post_templates_userId_fkey', 'post_templates_accountFolderId_fkey')
+  `;
+  const presentIndexes = new Set(indexes.map((i) => i.indexname));
+  const presentFks = new Set(fks.map((f) => f.conname));
+  return {
+    table: Boolean(table?.exists),
+    missingIndexes: RODADA16_INDEXES.filter((i) => !presentIndexes.has(i)),
+    missingForeignKeys: RODADA16_FKS.filter((f) => !presentFks.has(f)),
+  };
+}
+
 async function inspectRodada13Schema() {
   const [table] = await prisma.$queryRaw`
     SELECT EXISTS (

@@ -1070,6 +1070,38 @@ function normalizeListFilters(raw = {}) {
   };
 }
 
+// --- Rodada 16: duplicate post --------------------------------------------
+
+/**
+ * Copy of a post as a new DRAFT (same profile, type, caption, media and
+ * cover; no date). The media files are shared, not copied — the orphan
+ * check already handles files used by several posts. Posts whose file was
+ * freed by a cleanup can't be duplicated (nothing left to publish).
+ */
+async function duplicatePost(id, userId) {
+  const post = await getPost(id, userId);
+  const medias = post.medias || [];
+  const purged = medias.some((pm) => pm.mediaAsset?.purgedAt) || post.coverMediaAsset?.purgedAt;
+  if (purged) {
+    throw new AppError(
+      ErrorCodes.POST_MEDIA_PURGED,
+      'O arquivo deste post foi liberado pela Limpeza, então não dá para duplicar. Crie um post novo com a mídia.',
+      409
+    );
+  }
+  const copy = await createPost({
+    userId,
+    instagramAccountId: post.instagramAccountId,
+    type: post.type,
+    caption: post.caption,
+    mediaIds: medias.map((pm) => pm.mediaAssetId ?? pm.mediaAsset?.id),
+    scheduledFor: null,
+    coverMediaAssetId: post.coverMediaAssetId || undefined,
+  });
+  logger.info('Scheduled post duplicated', { userId, from: post.id, to: copy.id });
+  return copy;
+}
+
 // --- Rodada 15: calendar --------------------------------------------------
 
 const CALENDAR_DEFAULT_STATUSES = ['SCHEDULED', 'QUEUED', 'PUBLISHING', 'PUBLISHED', 'FAILED'];
@@ -1320,4 +1352,6 @@ module.exports = {
   bulkAction,
   // Rodada 15
   getCalendar,
+  // Rodada 16
+  duplicatePost,
 };

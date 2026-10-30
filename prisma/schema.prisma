@@ -131,6 +131,9 @@ model User {
   // Rodada 13: daily account metrics
   insightSnapshots AccountInsightSnapshot[]
 
+  // Rodada 16: reusable post templates
+  postTemplates PostTemplate[]
+
   @@map("users")
 }
 
@@ -413,6 +416,9 @@ model AccountFolder {
 
   members   AccountFolderMember[]
 
+  // Rodada 16: templates that target this folder
+  postTemplates PostTemplate[]
+
   @@unique([userId, name])
   @@index([userId])
   @@map("account_folders")
@@ -522,4 +528,28 @@ model AccountInsightSnapshot {
   @@unique([instagramAccountId, date])
   @@index([userId, date])
   @@map("account_insight_snapshots")
+}
+
+// Rodada 16: "Modelos" — reusable caption + hashtags + type + destination
+// folder. Applied in Novo post (one profile or many). type null = any type;
+// accountFolderId null = no destination (SetNull if the folder is deleted).
+model PostTemplate {
+  id              String         @id @default(uuid())
+  userId          String
+  user            User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name            String
+  type            String?
+  caption         String?        @db.Text
+  hashtags        String?        @db.Text
+  accountFolderId String?
+  accountFolder   AccountFolder? @relation(fields: [accountFolderId], references: [id], onDelete: SetNull)
+  usageCount      Int            @default(0)
+  lastUsedAt      DateTime?
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+
+  @@unique([userId, name])
+  @@index([userId])
+  @@index([accountFolderId])
+  @@map("post_templates")
 }

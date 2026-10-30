@@ -246,6 +246,14 @@ const getCalendar = async (req, res) => {
   return ok(res, { calendar });
 };
 
+// POST /api/posts/:id/duplicate
+// Rodada 16: copy as a new DRAFT. Returns { post }.
+const duplicatePost = async (req, res) => {
+  const post = await postService.duplicatePost(req.params.id, req.userId);
+  return ok(res, { post: postService.toPublicShape(post) });
+};
+
+module.exports.duplicatePost = duplicatePost;
 module.exports.getCalendar = getCalendar;
 module.exports.queryPosts = queryPosts;
 module.exports.getPostsOverview = getPostsOverview;

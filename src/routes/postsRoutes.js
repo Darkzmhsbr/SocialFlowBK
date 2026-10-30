@@ -40,6 +40,8 @@ router.patch('/:id', asyncHandler(controller.updatePost));
 router.post('/:id/archive', asyncHandler(controller.archivePost));
 // Rodada 5: "Publicar agora" for a single post.
 router.post('/:id/publish-now', asyncHandler(controller.publishNow));
+// Rodada 16: copy as a new draft.
+router.post('/:id/duplicate', asyncHandler(controller.duplicatePost));
 router.delete('/:id', asyncHandler(controller.deletePost));
 
 module.exports = router;

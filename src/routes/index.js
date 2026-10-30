@@ -15,6 +15,8 @@ const adminRoutes = require('./adminRoutes');
 const cleanupRoutes = require('./cleanupRoutes');
 // Rodada 13
 const metricsRoutes = require('./metricsRoutes');
+// Rodada 16
+const templatesRoutes = require('./templatesRoutes');
 
 const router = Router();
 
@@ -30,5 +32,6 @@ router.use('/notifications', notificationsRoutes); // -> /api/notifications/* (R
 router.use('/admin', adminRoutes); // -> /api/admin/* (Rodada 11)
 router.use('/cleanup', cleanupRoutes); // -> /api/cleanup/* (Rodada 12)
 router.use('/metrics', metricsRoutes); // -> /api/metrics/* (Rodada 13)
+router.use('/templates', templatesRoutes); // -> /api/templates/* (Rodada 16)
 
 module.exports = router;
