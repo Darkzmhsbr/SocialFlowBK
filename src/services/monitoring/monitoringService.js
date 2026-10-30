@@ -57,11 +57,22 @@ function formatTime(date) {
 
 function issuesFor(account, ctx, now) {
   const issues = [];
-  if (account.status !== 'ACTIVE') {
+  // Rodada 19A: blocked (tested again automatically) vs token dead (reconnect).
+  if (account.status === 'ERROR') {
     issues.push({
       key: 'down',
       severity: 'critical',
-      title: 'Perfil desconectado',
+      title: 'Perfil bloqueado ou restrito',
+      cause: `${String(account.lastErrorMessage || 'O Instagram informou que a conta está restrita ou sem permissão').replace(/\.\s*$/, '')}${
+        account.lastErrorCode && /^\d+$/.test(account.lastErrorCode) ? ` (código ${account.lastErrorCode})` : ''
+      }. O SocialFlow testa o perfil sozinho e retoma a fila quando a Meta liberar. Se o Instagram pediu para confirmar a identidade, reconecte.`,
+      action: { label: 'Reconectar em Contas', to: '/accounts' },
+    });
+  } else if (account.status !== 'ACTIVE') {
+    issues.push({
+      key: 'down',
+      severity: 'critical',
+      title: 'Precisa reconectar',
       cause: account.lastErrorMessage || 'A autorização do Instagram não vale mais (senha trocada, conta restrita ou acesso removido).',
       action: { label: 'Reconectar em Contas', to: '/accounts' },
     });
@@ -95,6 +106,8 @@ function issuesFor(account, ctx, now) {
       title: `${failed} falha(s) nas últimas 24h`,
       cause: ctx.lastFailure.get(account.id) || 'O Instagram recusou a publicação.',
       action: { label: 'Ver falhas', to: '/posts' },
+      // Rodada 19A: one-click "Publicar agora" (spaced) for this profile's failures
+      ...(account.status === 'ACTIVE' ? { republish: { accountId: account.id, count: failed } } : {}),
     });
   }
   if (account.status === 'ACTIVE' && ctx.recentlyActive.has(account.id) && !ctx.upcoming.has(account.id)) {
@@ -131,6 +144,7 @@ async function getOverview(userId, now = Date.now()) {
       pauseReason: true,
       lastErrorMessage: true,
       lastErrorAt: true,
+      lastErrorCode: true, // Rodada 19A
       tokenExpiresAt: true,
       lastHealthCheckAt: true,
     },

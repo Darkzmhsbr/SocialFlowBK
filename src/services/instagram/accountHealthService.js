@@ -166,13 +166,21 @@ async function markAccountDown(accountId, classification) {
     status === 'TOKEN_EXPIRED'
       ? 'A sessão do Instagram foi invalidada (conta desativada, senha trocada ou acesso removido).'
       : 'O Instagram informou que a conta está restrita, inativa ou sem permissão.';
+  // Rodada 19A: what happens next depends on the kind of problem.
+  const next =
+    status === 'TOKEN_EXPIRED'
+      ? 'Abra o Instagram, resolva o aviso (ex.: confirmar identidade) e use "Reconectar" — as publicações voltam sozinhas depois.'
+      : 'Se for um bloqueio temporário, o SocialFlow testa o perfil sozinho e retoma a fila quando a Meta liberar. Se o Instagram pediu para confirmar a identidade, resolva no app e use "Reconectar".';
+  const codeText = classification.code
+    ? ` (código ${classification.code}${classification.subcode ? `/${classification.subcode}` : ''})`
+    : '';
 
   await notificationService.notify({
     userId: account.userId,
     type: 'ACCOUNT_DOWN',
     severity: 'error',
     title: `@${account.username} com problema`,
-    message: `${why} ${pending} post(s) ficaram pausados na fila. Verifique o perfil no Instagram e use "Reconectar" — as publicações voltam sozinhas depois.`,
+    message: `${why}${codeText} ${pending} post(s) ficaram pausados na fila. ${next}`, // Rodada 19A: + code + next steps
     instagramAccountId: accountId,
     dedupeKey: `down:${accountId}`,
     dedupeWindowMinutes: 24 * 60,
@@ -228,11 +236,136 @@ async function runHealthChecks() {
     for (const account of accounts) {
       await checkOneAccount(account);
     }
+    // Rodada 19A: profiles marked down by a temporary block get re-tested.
+    await runRecoveryChecks();
   } catch (err) {
     logger.error('Account health run failed', { error: err.message });
   } finally {
     healthRunning = false;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Rodada 19A: automatic recovery of temporarily blocked profiles
+// ---------------------------------------------------------------------------
+//
+// Only status ERROR (restriction / block / no permission — the token may
+// still be valid). TOKEN_EXPIRED (token dead: password changed, identity
+// confirmation, access removed) is never re-tested: the user must reconnect,
+// exactly as before.
+//
+// Test = read the profile AND the publishing quota with the stored token.
+// Works -> ACTIVE again, queue resumes, "voltou sozinho" alert.
+// Token dead (190) -> TOKEN_EXPIRED + "precisa reconectar" alert.
+// Still blocked -> try again later: 30 min, 1h, 2h, 4h, then every 6h.
+// A profile that falls again within 24h of coming back starts at 2h.
+
+const RECOVERY_STEPS_MIN = [30, 60, 120, 240, 360];
+const RECOVERY_PER_RUN = 10;
+const recoveryAttempts = new Map(); // accountId -> consecutive failed tests
+const recoveredAt = new Map(); // accountId -> when it last came back
+
+function recoveryIntervalMs(accountId) {
+  const n = recoveryAttempts.get(accountId) || 0;
+  const flapped = recoveredAt.has(accountId) && Date.now() - recoveredAt.get(accountId) < 24 * 60 * 60 * 1000;
+  const index = Math.min(n + (flapped ? 2 : 0), RECOVERY_STEPS_MIN.length - 1);
+  return RECOVERY_STEPS_MIN[index] * 60 * 1000;
+}
+
+async function runRecoveryChecks() {
+  const candidates = await prisma.instagramAccount.findMany({
+    where: { status: 'ERROR' },
+    orderBy: { lastHealthCheckAt: 'asc' },
+    take: 50,
+  });
+  const due = candidates
+    .filter((a) => {
+      const last = (a.lastHealthCheckAt || a.lastErrorAt || new Date(0)).getTime();
+      return Date.now() - last >= recoveryIntervalMs(a.id);
+    })
+    .slice(0, RECOVERY_PER_RUN);
+  for (const account of due) {
+    await tryRecoverAccount(account);
+  }
+  return due.length;
+}
+
+async function tryRecoverAccount(account) {
+  let token;
+  try {
+    token = decryptToken(account.accessTokenEncrypted);
+  } catch {
+    return 'skipped';
+  }
+  try {
+    await instagramApiClient.fetchAuthorizedProfile(token);
+    await instagramApiClient.fetchContentPublishingLimit(account.instagramUserId, token);
+  } catch (err) {
+    const c = classifyMetaError(err, { context: 'health' });
+    if (c.kind === 'TOKEN_INVALID') {
+      recoveryAttempts.delete(account.id);
+      await markAccountDown(account.id, c); // -> TOKEN_EXPIRED, "reconecte"
+      return 'token_dead';
+    }
+    recoveryAttempts.set(account.id, (recoveryAttempts.get(account.id) || 0) + 1);
+    await prisma.instagramAccount
+      .update({ where: { id: account.id }, data: { lastHealthCheckAt: new Date() } })
+      .catch(() => {});
+    logger.info('Recovery test: profile still blocked', {
+      accountId: account.id,
+      kind: c.kind,
+      nextTestMinutes: recoveryIntervalMs(account.id) / 60000,
+    });
+    return 'still_down';
+  }
+
+  // Works again.
+  const updated = await prisma.instagramAccount.updateMany({
+    where: { id: account.id, status: 'ERROR' }, // a reconnect in the meantime wins
+    data: {
+      status: 'ACTIVE',
+      lastErrorCode: null,
+      lastErrorMessage: null,
+      lastErrorAt: null,
+      lastHealthCheckAt: new Date(),
+    },
+  });
+  if (updated.count === 0) return 'changed';
+  recoveryAttempts.delete(account.id);
+  recoveredAt.set(account.id, Date.now());
+  await notifyAccountBack(account, 'recovered');
+  logger.info('Instagram account recovered automatically', { accountId: account.id });
+  return 'recovered';
+}
+
+/**
+ * "Voltou" alert (bell + Telegram), used by the automatic recovery and by a
+ * manual reconnect of a profile that was down. kind: 'recovered' | 'reconnected'
+ */
+async function notifyAccountBack(account, kind) {
+  const [pending, failed] = await Promise.all([
+    countPendingPosts(account.id),
+    prisma.scheduledPost.count({
+      where: {
+        instagramAccountId: account.id,
+        status: 'FAILED',
+        updatedAt: { gte: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000) },
+      },
+    }),
+  ]);
+  const parts = [];
+  parts.push(pending ? `${pending} post(s) da fila voltam a sair normalmente.` : 'Nenhum post estava esperando na fila.');
+  if (failed) parts.push(`${failed} falharam nos últimos 7 dias: use "Republicar falhas" em Monitoramento.`);
+  await notificationService.notify({
+    userId: account.userId,
+    type: 'ACCOUNT_RECOVERED',
+    severity: 'success',
+    title: kind === 'recovered' ? `✅ @${account.username} voltou sozinho` : `✅ @${account.username} reconectado`,
+    message: `${kind === 'recovered' ? 'O bloqueio do Instagram acabou e o perfil está ativo de novo.' : 'Perfil conectado de novo com uma autorização nova.'} ${parts.join(' ')}`,
+    instagramAccountId: account.id,
+    dedupeKey: `back:${account.id}:${new Date().toISOString().slice(0, 13)}`,
+    dedupeWindowMinutes: 60,
+  });
 }
 
 async function checkOneAccount(account) {
@@ -336,4 +469,12 @@ module.exports = {
   runHealthChecks,
   startHealthChecks,
   stopHealthChecks,
+  // Rodada 19A
+  runRecoveryChecks,
+  tryRecoverAccount,
+  notifyAccountBack,
+  _resetRecovery() {
+    recoveryAttempts.clear();
+    recoveredAt.clear();
+  },
 };

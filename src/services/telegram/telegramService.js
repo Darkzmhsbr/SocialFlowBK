@@ -23,6 +23,8 @@ const logger = require('../../utils/logger');
 const ALERT_TYPES = [
   { key: 'ACCOUNT_DOWN', label: 'Perfil caiu / precisa reconectar', default: true },
   { key: 'ACCOUNT_PAUSED', label: 'Perfil pausado por limite da Meta', default: true },
+  // Rodada 19A
+  { key: 'ACCOUNT_RECOVERED', label: 'Perfil voltou / reconectado', default: true },
   { key: 'POSTS_FAILED', label: 'Falha ao publicar', default: true },
   { key: 'TOKEN_EXPIRING', label: 'Autorização de perfil perto de vencer', default: true },
   { key: 'QUEUE_EMPTY', label: 'Perfis ativos sem posts agendados (fim da tarde)', default: true },

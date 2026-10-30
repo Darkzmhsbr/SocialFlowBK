@@ -162,7 +162,7 @@ async function publishFeedImage(post, igUserId, caption, accessToken) {
     accessToken,
   });
 
-  const { mediaId } = await instagramApiClient.publishMediaContainer(
+  const { mediaId } = await publishContainerSafely( // Rodada 19A: was instagramApiClient.publishMediaContainer(
     igUserId,
     creationId,
     accessToken
@@ -195,7 +195,7 @@ async function publishFeedVideo(post, igUserId, caption, accessToken) {
     coverUrl,
   });
 
-  const { mediaId } = await instagramApiClient.publishMediaContainer(
+  const { mediaId } = await publishContainerSafely( // Rodada 19A: was instagramApiClient.publishMediaContainer(
     igUserId,
     creationId,
     accessToken
@@ -227,7 +227,7 @@ async function publishReel(post, igUserId, caption, accessToken) {
     // expose this as a per-post option in the composer.
   });
 
-  const { mediaId } = await instagramApiClient.publishMediaContainer(
+  const { mediaId } = await publishContainerSafely( // Rodada 19A: was instagramApiClient.publishMediaContainer(
     igUserId,
     creationId,
     accessToken
@@ -255,7 +255,7 @@ async function publishStory(post, igUserId, accessToken) {
     accessToken,
   });
 
-  const { mediaId } = await instagramApiClient.publishMediaContainer(
+  const { mediaId } = await publishContainerSafely( // Rodada 19A: was instagramApiClient.publishMediaContainer(
     igUserId,
     creationId,
     accessToken
@@ -297,13 +297,51 @@ async function publishCarousel(post, igUserId, caption, accessToken) {
     accessToken,
   });
 
-  const { mediaId } = await instagramApiClient.publishMediaContainer(
+  const { mediaId } = await publishContainerSafely( // Rodada 19A: was instagramApiClient.publishMediaContainer(
     igUserId,
     creationId,
     accessToken
   );
 
   return mediaId;
+}
+
+// --- Rodada 19A: duplicate-safe publish -----------------------------------
+
+/**
+ * media_publish sometimes fails (or times out) AFTER Instagram already put
+ * the post live. Retrying would publish it twice. So when media_publish
+ * throws, ask the container: if it says PUBLISHED, the post is live — find
+ * its id among the latest media and report success instead of retrying.
+ */
+async function publishContainerSafely(igUserId, creationId, accessToken) {
+  const startedAt = Date.now();
+  try {
+    return await instagramApiClient.publishMediaContainer(igUserId, creationId, accessToken);
+  } catch (error) {
+    let container = null;
+    try {
+      container = await instagramApiClient.getMediaContainerStatus(creationId, accessToken);
+    } catch {
+      throw error; // can't confirm: keep the original error
+    }
+    if (container?.statusCode !== 'PUBLISHED') throw error;
+
+    let mediaId = null;
+    try {
+      const recent = await instagramApiClient.fetchRecentMedia(igUserId, accessToken, 5);
+      const live = recent.find((m) => m.timestamp && new Date(m.timestamp).getTime() >= startedAt - 5 * 60 * 1000);
+      mediaId = live?.id || null;
+    } catch {
+      // the post is live anyway; metrics just won't find it
+    }
+    logger.warn('media_publish failed but the post IS live on Instagram — not retrying (no duplicate)', {
+      creationId,
+      mediaId,
+      error: error.message,
+    });
+    return { mediaId };
+  }
 }
 
 /**

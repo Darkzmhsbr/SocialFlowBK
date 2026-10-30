@@ -3,6 +3,8 @@ const accountRepository = require('../../database/instagramAccountRepository');
 const { encryptToken } = require('../../utils/crypto');
 const { AppError, ErrorCodes } = require('../../utils/errors');
 const logger = require('../../utils/logger');
+// Rodada 19A: "✅ @perfil reconectado" when a profile that was down comes back.
+const prisma = require('../../config/database');
 
 const PROFESSIONAL_ACCOUNT_TYPES = ['BUSINESS', 'MEDIA_CREATOR'];
 
@@ -19,6 +21,11 @@ async function connectAndStoreAccount({ userId, accessToken, tokenExpiresAt, met
     );
   }
 
+  // Rodada 19A: state BEFORE the reconnect (null = new profile).
+  const previous = await prisma.instagramAccount
+    .findUnique({ where: { instagramUserId: String(profile.id) }, select: { status: true, publishPausedUntil: true } })
+    .catch(() => null);
+
   const account = await accountRepository.upsertByInstagramUserId({
     userId,
     instagramUserId: String(profile.id),
@@ -32,6 +39,14 @@ async function connectAndStoreAccount({ userId, accessToken, tokenExpiresAt, met
   });
 
   logger.info('Instagram account saved', { accountId: account.id });
+
+  // Rodada 19A: reconnecting a profile that was down -> alert (bell + Telegram)
+  // with what happens to its posts now.
+  if (previous && previous.status !== 'ACTIVE') {
+    require('./accountHealthService')
+      .notifyAccountBack(account, 'reconnected')
+      .catch((err) => logger.warn('Reconnect notification failed (ignored)', { error: err.message }));
+  }
 
   return account;
 }

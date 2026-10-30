@@ -316,10 +316,18 @@ async function fetchMediaInsights(mediaId, accessToken, metrics) {
 function toAppError(error, contextMessage) {
   const metaError = error.response?.data?.error;
 
-  logger.error(contextMessage, {
+  // Rodada 19A: the Meta code/reason goes in the log line itself (Railway
+  // shows the message first; the fields stay below for details).
+  const metaCodeText = metaError
+    ? `código ${metaError.code ?? '?'}${metaError.error_subcode ? `/${metaError.error_subcode}` : ''}`
+    : null;
+  const metaReason = metaError ? metaError.error_user_msg || metaError.message || '' : '';
+  logger.error(metaError ? `${contextMessage} — ${metaCodeText}: ${metaReason}` : contextMessage, {
     metaErrorCode: metaError?.code,
+    metaErrorSubcode: metaError?.error_subcode,
     metaErrorType: metaError?.type,
     metaErrorMessage: metaError?.message,
+    metaErrorUserMessage: metaError?.error_user_msg,
     httpStatus: error.response?.status,
   });
 
@@ -330,13 +338,34 @@ function toAppError(error, contextMessage) {
   if (metaError) {
     return new AppError(
       ErrorCodes.META_API_ERROR,
-      'O Instagram recusou a solicitação.',
+      // Rodada 19A: was 'O Instagram recusou a solicitação.' — now with the reason
+      `O Instagram recusou a solicitação (${metaCodeText})${metaReason ? `: ${String(metaReason).slice(0, 300)}` : '.'}`,
       error.response.status || 502,
       metaError
     );
   }
 
   return new AppError(ErrorCodes.META_API_ERROR, 'Não foi possível comunicar com o Instagram.', 502);
+}
+
+// --- Rodada 19A: recent media (duplicate-safe publish) -------------------
+
+/**
+ * Latest media of the account, newest first. Used when media_publish fails
+ * but the container says PUBLISHED: finds the id of the post that went live.
+ * @returns {Promise<Array<{ id: string, timestamp: string|null }>>}
+ */
+async function fetchRecentMedia(igUserId, accessToken, limit = 5) {
+  try {
+    const { data } = await axios.get(`${apiBase()}/${igUserId}/media`, {
+      params: { fields: 'id,timestamp', limit, access_token: accessToken },
+      timeout: 15000,
+    });
+    return (data?.data || []).map((m) => ({ id: String(m.id), timestamp: m.timestamp || null }));
+  } catch (error) {
+    if (error instanceof AppError) throw error;
+    throw toAppError(error, 'Failed to fetch recent Instagram media');
+  }
 }
 
 // --- Rodada 18: media info (permalink + thumbnail) -----------------------
@@ -479,4 +508,6 @@ module.exports = {
   fetchAccountInsights,
   // Rodada 18
   fetchMediaInfo,
+  // Rodada 19A
+  fetchRecentMedia,
 };
