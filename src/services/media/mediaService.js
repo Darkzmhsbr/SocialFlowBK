@@ -233,6 +233,8 @@ function toPublicShape(asset) {
     // Rodada 7: library info
     inLibrary: Boolean(asset.inLibrary),
     folderId: asset.folderId ?? null,
+    // Rodada 12: file freed by a cleanup
+    purged: Boolean(asset.purgedAt),
   };
 }
 
@@ -398,4 +400,6 @@ Object.assign(module.exports, {
   listLibrary,
   saveToLibrary,
   removeFromLibrary,
+  // Rodada 12: used by the cleanup service
+  deleteFromStorage,
 });

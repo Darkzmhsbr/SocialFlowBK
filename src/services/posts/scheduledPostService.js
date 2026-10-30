@@ -498,6 +498,8 @@ function toPublicShape(post) {
       width: pm.mediaAsset.width,
       height: pm.mediaAsset.height,
       durationSec: pm.mediaAsset.durationSec,
+      // Rodada 12: file freed by a cleanup (published posts only)
+      purged: Boolean(pm.mediaAsset.purgedAt),
     })),
     cover: post.coverMediaAsset
       ? {

@@ -75,6 +75,14 @@
 //   - InstagramAccount.metaAppCredentialId: which app connected the profile
 //     (null = default app). Removing the credential sets it to null.
 //   Applied via POST|GET /api/setup/migrate-rodada10-meta-app.
+//
+// Rodada 12 additions (cleanup + reports):
+//   - CleanupJob: one background cleanup (delete posts / archive posts /
+//     free storage of published posts), with progress and final report.
+//   - CleanupSetting: per-user automatic rules (daily).
+//   - MediaAsset.purgedAt: file removed from storage by "liberar
+//     armazenamento"; the row stays so published posts keep their history.
+//   Applied via POST|GET /api/setup/migrate-rodada12-cleanup.
 
 generator client {
   provider = "prisma-client-js"
@@ -115,6 +123,10 @@ model User {
 
   // Rodada 10: own Meta app (optional, one per user)
   metaAppCredential MetaAppCredential?
+
+  // Rodada 12: cleanup
+  cleanupJobs    CleanupJob[]
+  cleanupSetting CleanupSetting?
 
   @@map("users")
 }
@@ -211,6 +223,9 @@ model MediaAsset {
   inLibrary          Boolean      @default(false)
   folderId           String?
   folder             MediaFolder? @relation(fields: [folderId], references: [id], onDelete: SetNull)
+
+  // Rodada 12: file deleted from storage by a cleanup (row kept for history)
+  purgedAt           DateTime?
 
   createdAt          DateTime  @default(now())
 
@@ -427,4 +442,46 @@ model MetaAppCredential {
   instagramAccounts  InstagramAccount[]
 
   @@map("meta_app_credentials")
+}
+
+// --- Rodada 12: cleanup + reports --------------------------------------------
+
+model CleanupJob {
+  id              String    @id @default(uuid())
+  userId          String
+  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  kind            String    @default("MANUAL") // MANUAL | AUTO
+  action          String    // DELETE_POSTS | ARCHIVE_POSTS | FREE_STORAGE
+  status          String    @default("QUEUED") // QUEUED | RUNNING | DONE | FAILED | CANCELED
+  filter          Json?
+  matched         Int       @default(0)
+  processed       Int       @default(0)
+  affected        Int       @default(0)
+  skipped         Int       @default(0)
+  mediaDeleted    Int       @default(0)
+  bytesFreed      Float     @default(0)
+  skippedReasons  Json?
+  cursor          String?
+  cancelRequested Boolean   @default(false)
+  errorMessage    String?   @db.Text
+  startedAt       DateTime?
+  finishedAt      DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  @@index([userId, createdAt])
+  @@index([status])
+  @@map("cleanup_jobs")
+}
+
+model CleanupSetting {
+  userId                 String    @id
+  user                   User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  freeStorageAfterDays   Int?      // null = off
+  archiveFailedAfterDays Int?      // null = off
+  lastAutoRunAt          DateTime?
+  createdAt              DateTime  @default(now())
+  updatedAt              DateTime  @updatedAt
+
+  @@map("cleanup_settings")
 }

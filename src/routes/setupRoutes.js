@@ -814,6 +814,151 @@ async function migrateRodada10MetaApp(req, res) {
 router.get('/migrate-rodada10-meta-app', migrateRodada10MetaApp);
 router.post('/migrate-rodada10-meta-app', migrateRodada10MetaApp);
 
+// GET  /api/setup/migrate-rodada12-cleanup?token=SEU_TOKEN   (pelo navegador)
+// POST /api/setup/migrate-rodada12-cleanup?token=SEU_TOKEN   (curl/Postman)
+//
+// Rodada 12 (cleanup + reports) schema migration:
+//   - media_assets."purgedAt" TIMESTAMP(3) (nullable)
+//   - cleanup_jobs: new table + FK users (CASCADE) + indexes
+//   - cleanup_settings: new table (PK userId) + FK users (CASCADE)
+// Names match what Prisma generates for schema.prisma (no drift).
+// Run RIGHT AFTER the backend deploy goes Active. Idempotent,
+// transactional, existing data untouched.
+const RODADA12_INDEXES = ['cleanup_jobs_userId_createdAt_idx', 'cleanup_jobs_status_idx'];
+
+async function migrateRodada12Cleanup(req, res) {
+  if (!assertSetupToken(req, res)) return;
+
+  try {
+    const before = await inspectRodada12Schema();
+    if (before.purgedColumn && before.jobsTable && before.settingsTable && before.missingIndexes.length === 0) {
+      return res.json({
+        success: true,
+        data: {
+          applied: { columnAdded: false, tablesCreated: [], indexesCreated: [] },
+          schema: before,
+          message: 'Nada a migrar. Limpeza e relatórios já existem.',
+        },
+      });
+    }
+
+    await prisma.$transaction([
+      prisma.$executeRawUnsafe(
+        'ALTER TABLE "media_assets" ADD COLUMN IF NOT EXISTS "purgedAt" TIMESTAMP(3)'
+      ),
+      prisma.$executeRawUnsafe(
+        'CREATE TABLE IF NOT EXISTS "cleanup_jobs" (' +
+          '"id" TEXT NOT NULL, ' +
+          '"userId" TEXT NOT NULL, ' +
+          '"kind" TEXT NOT NULL DEFAULT \'MANUAL\', ' +
+          '"action" TEXT NOT NULL, ' +
+          '"status" TEXT NOT NULL DEFAULT \'QUEUED\', ' +
+          '"filter" JSONB, ' +
+          '"matched" INTEGER NOT NULL DEFAULT 0, ' +
+          '"processed" INTEGER NOT NULL DEFAULT 0, ' +
+          '"affected" INTEGER NOT NULL DEFAULT 0, ' +
+          '"skipped" INTEGER NOT NULL DEFAULT 0, ' +
+          '"mediaDeleted" INTEGER NOT NULL DEFAULT 0, ' +
+          '"bytesFreed" DOUBLE PRECISION NOT NULL DEFAULT 0, ' +
+          '"skippedReasons" JSONB, ' +
+          '"cursor" TEXT, ' +
+          '"cancelRequested" BOOLEAN NOT NULL DEFAULT false, ' +
+          '"errorMessage" TEXT, ' +
+          '"startedAt" TIMESTAMP(3), ' +
+          '"finishedAt" TIMESTAMP(3), ' +
+          '"createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP, ' +
+          '"updatedAt" TIMESTAMP(3) NOT NULL, ' +
+          'CONSTRAINT "cleanup_jobs_pkey" PRIMARY KEY ("id"), ' +
+          'CONSTRAINT "cleanup_jobs_userId_fkey" FOREIGN KEY ("userId") ' +
+          'REFERENCES "users"("id") ON DELETE CASCADE ON UPDATE CASCADE' +
+          ')'
+      ),
+      prisma.$executeRawUnsafe(
+        'CREATE INDEX IF NOT EXISTS "cleanup_jobs_userId_createdAt_idx" ON "cleanup_jobs"("userId", "createdAt")'
+      ),
+      prisma.$executeRawUnsafe(
+        'CREATE INDEX IF NOT EXISTS "cleanup_jobs_status_idx" ON "cleanup_jobs"("status")'
+      ),
+      prisma.$executeRawUnsafe(
+        'CREATE TABLE IF NOT EXISTS "cleanup_settings" (' +
+          '"userId" TEXT NOT NULL, ' +
+          '"freeStorageAfterDays" INTEGER, ' +
+          '"archiveFailedAfterDays" INTEGER, ' +
+          '"lastAutoRunAt" TIMESTAMP(3), ' +
+          '"createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP, ' +
+          '"updatedAt" TIMESTAMP(3) NOT NULL, ' +
+          'CONSTRAINT "cleanup_settings_pkey" PRIMARY KEY ("userId"), ' +
+          'CONSTRAINT "cleanup_settings_userId_fkey" FOREIGN KEY ("userId") ' +
+          'REFERENCES "users"("id") ON DELETE CASCADE ON UPDATE CASCADE' +
+          ')'
+      ),
+    ]);
+
+    const after = await inspectRodada12Schema();
+    const applied = {
+      columnAdded: !before.purgedColumn && after.purgedColumn,
+      tablesCreated: [
+        !before.jobsTable && after.jobsTable ? 'cleanup_jobs' : null,
+        !before.settingsTable && after.settingsTable ? 'cleanup_settings' : null,
+      ].filter(Boolean),
+      indexesCreated: before.missingIndexes.filter((i) => !after.missingIndexes.includes(i)),
+    };
+
+    logger.info('Rodada 12 cleanup migration applied', { applied, schema: after });
+
+    return res.json({
+      success: true,
+      data: {
+        applied,
+        schema: after,
+        message: 'Migração Rodada 12 concluída. Limpeza e relatórios liberados - pode publicar o frontend.',
+      },
+    });
+  } catch (error) {
+    logger.error('Failed to apply Rodada 12 cleanup migration', {
+      message: error.message,
+      code: error.code,
+      meta: error.meta,
+    });
+    return res.status(500).json({
+      success: false,
+      error: {
+        code: error.code || 'PRISMA_ERROR',
+        message: error.message,
+        details: error.meta || null,
+      },
+    });
+  }
+}
+
+router.get('/migrate-rodada12-cleanup', migrateRodada12Cleanup);
+router.post('/migrate-rodada12-cleanup', migrateRodada12Cleanup);
+
+async function inspectRodada12Schema() {
+  const [column] = await prisma.$queryRaw`
+    SELECT EXISTS (
+      SELECT 1 FROM information_schema.columns
+      WHERE table_schema = current_schema() AND table_name = 'media_assets' AND column_name = 'purgedAt'
+    ) AS "exists"
+  `;
+  const tables = await prisma.$queryRaw`
+    SELECT table_name::text AS table_name FROM information_schema.tables
+    WHERE table_schema = current_schema() AND table_name IN ('cleanup_jobs', 'cleanup_settings')
+  `;
+  const present = new Set(tables.map((t) => t.table_name));
+  const indexes = await prisma.$queryRaw`
+    SELECT indexname::text AS indexname FROM pg_indexes
+    WHERE schemaname = current_schema() AND tablename = 'cleanup_jobs'
+  `;
+  const presentIndexes = new Set(indexes.map((i) => i.indexname));
+  return {
+    purgedColumn: Boolean(column?.exists),
+    jobsTable: present.has('cleanup_jobs'),
+    settingsTable: present.has('cleanup_settings'),
+    missingIndexes: RODADA12_INDEXES.filter((i) => !presentIndexes.has(i)),
+  };
+}
+
 async function inspectRodada10Schema() {
   const [table] = await prisma.$queryRaw`
     SELECT EXISTS (

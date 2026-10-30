@@ -90,6 +90,10 @@ const ErrorCodes = {
   // Rodada 11 - admin / invites
   FORBIDDEN: 'FORBIDDEN',
   INVITE_NOT_FOUND: 'INVITE_NOT_FOUND',
+
+  // Rodada 12 - cleanup
+  CLEANUP_JOB_NOT_FOUND: 'CLEANUP_JOB_NOT_FOUND',
+  CLEANUP_INVALID: 'CLEANUP_INVALID',
 };
 
 module.exports = { AppError, ErrorCodes };

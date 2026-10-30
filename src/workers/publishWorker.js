@@ -35,6 +35,8 @@ const logger = require('../utils/logger');
 // Rodada 5: notifications + account health check.
 const notificationService = require('../services/notifications/notificationService');
 const accountHealthService = require('../services/instagram/accountHealthService');
+// Rodada 12: background cleanup jobs + daily automatic rules.
+const cleanupService = require('../services/cleanup/cleanupService');
 
 let isTicking = false;
 let task = null;
@@ -204,6 +206,8 @@ function start() {
 
   // Rodada 5: periodic account health check + token refresh.
   accountHealthService.startHealthChecks();
+  // Rodada 12
+  cleanupService.startRunner();
 }
 
 function stop() {
@@ -214,6 +218,8 @@ function stop() {
   }
   // Rodada 5
   accountHealthService.stopHealthChecks();
+  // Rodada 12
+  cleanupService.stopRunner();
 }
 
 module.exports = { start, stop, tick };
