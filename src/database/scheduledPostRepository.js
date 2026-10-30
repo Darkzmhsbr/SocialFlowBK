@@ -569,8 +569,12 @@ async function requeueMany(entries) {
  *   types               - list of ScheduledPostType
  *   q                   - text in the caption OR in the @username
  */
-function buildPostFilterWhere(userId, { status, statuses, instagramAccountId, types, q } = {}) {
+// Rodada 8: accountFolderId -> only posts of profiles in that folder.
+function buildPostFilterWhere(userId, { status, statuses, instagramAccountId, types, q, accountFolderId } = {}) {
   const where = { userId };
+  if (accountFolderId) {
+    where.instagramAccount = { folderMemberships: { some: { folderId: accountFolderId } } };
+  }
   if (status) where.status = status;
   else if (Array.isArray(statuses) && statuses.length > 0) where.status = { in: statuses };
   if (instagramAccountId) where.instagramAccountId = instagramAccountId;

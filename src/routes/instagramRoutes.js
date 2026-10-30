@@ -2,6 +2,8 @@ const { Router } = require('express');
 const asyncHandler = require('../middleware/asyncHandler');
 const requireAuth = require('../middleware/requireAuth');
 const controller = require('../controllers/instagramController');
+// Rodada 8: profile folders
+const foldersController = require('../controllers/accountFoldersController');
 
 const router = Router();
 
@@ -11,6 +13,15 @@ router.get('/callback', asyncHandler(controller.handleCallback));
 // Everything below requires a logged-in user.
 router.get('/authorize-url', requireAuth, asyncHandler(controller.getAuthorizeUrl));
 router.get('/accounts', requireAuth, asyncHandler(controller.listAccounts));
+
+// Rodada 8: profile folders (/api/instagram/folders/*)
+router.get('/folders', requireAuth, asyncHandler(foldersController.listFolders));
+router.post('/folders', requireAuth, asyncHandler(foldersController.createFolder));
+router.patch('/folders/:id', requireAuth, asyncHandler(foldersController.renameFolder));
+router.delete('/folders/:id', requireAuth, asyncHandler(foldersController.deleteFolder));
+router.put('/folders/:id/members', requireAuth, asyncHandler(foldersController.setMembers));
+router.post('/folders/:id/members', requireAuth, asyncHandler(foldersController.addMembers));
+router.delete('/folders/:id/members', requireAuth, asyncHandler(foldersController.removeMembers));
 
 // NOTE: /accounts/:id/status must be declared BEFORE /accounts/:id, or
 // Express would match ":id" first with id = ":id/status". Express does

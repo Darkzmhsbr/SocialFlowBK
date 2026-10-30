@@ -602,6 +602,135 @@ async function migrateRodada7Library(req, res) {
 router.get('/migrate-rodada7-library', migrateRodada7Library);
 router.post('/migrate-rodada7-library', migrateRodada7Library);
 
+// GET  /api/setup/migrate-rodada8-account-folders?token=SEU_TOKEN   (pelo navegador)
+// POST /api/setup/migrate-rodada8-account-folders?token=SEU_TOKEN   (curl/Postman)
+//
+// Rodada 8 (profile folders) schema migration:
+//   - account_folders: new table + FK users (CASCADE), unique (userId, name),
+//     index (userId)
+//   - account_folder_members: new table, PK (folderId, instagramAccountId),
+//     FKs to account_folders and instagram_accounts (both CASCADE: deleting
+//     a folder or a profile only removes the link), index (instagramAccountId)
+// Names match what Prisma generates for schema.prisma (no drift).
+// Run RIGHT AFTER the backend deploy goes Active. Idempotent,
+// transactional, existing data untouched.
+const RODADA8_INDEXES = [
+  'account_folders_userId_name_key',
+  'account_folders_userId_idx',
+  'account_folder_members_instagramAccountId_idx',
+];
+
+async function migrateRodada8AccountFolders(req, res) {
+  if (!assertSetupToken(req, res)) return;
+
+  try {
+    const before = await inspectRodada8Schema();
+    if (before.foldersTable && before.membersTable && before.missingIndexes.length === 0) {
+      return res.json({
+        success: true,
+        data: {
+          applied: { tablesCreated: [], indexesCreated: [] },
+          schema: before,
+          message: 'Nada a migrar. As pastas de perfis já existem.',
+        },
+      });
+    }
+
+    await prisma.$transaction([
+      prisma.$executeRawUnsafe(
+        'CREATE TABLE IF NOT EXISTS "account_folders" (' +
+          '"id" TEXT NOT NULL, ' +
+          '"userId" TEXT NOT NULL, ' +
+          '"name" TEXT NOT NULL, ' +
+          '"createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP, ' +
+          '"updatedAt" TIMESTAMP(3) NOT NULL, ' +
+          'CONSTRAINT "account_folders_pkey" PRIMARY KEY ("id"), ' +
+          'CONSTRAINT "account_folders_userId_fkey" FOREIGN KEY ("userId") ' +
+          'REFERENCES "users"("id") ON DELETE CASCADE ON UPDATE CASCADE' +
+          ')'
+      ),
+      prisma.$executeRawUnsafe(
+        'CREATE UNIQUE INDEX IF NOT EXISTS "account_folders_userId_name_key" ON "account_folders"("userId", "name")'
+      ),
+      prisma.$executeRawUnsafe(
+        'CREATE INDEX IF NOT EXISTS "account_folders_userId_idx" ON "account_folders"("userId")'
+      ),
+      prisma.$executeRawUnsafe(
+        'CREATE TABLE IF NOT EXISTS "account_folder_members" (' +
+          '"folderId" TEXT NOT NULL, ' +
+          '"instagramAccountId" TEXT NOT NULL, ' +
+          '"createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP, ' +
+          'CONSTRAINT "account_folder_members_pkey" PRIMARY KEY ("folderId", "instagramAccountId"), ' +
+          'CONSTRAINT "account_folder_members_folderId_fkey" FOREIGN KEY ("folderId") ' +
+          'REFERENCES "account_folders"("id") ON DELETE CASCADE ON UPDATE CASCADE, ' +
+          'CONSTRAINT "account_folder_members_instagramAccountId_fkey" FOREIGN KEY ("instagramAccountId") ' +
+          'REFERENCES "instagram_accounts"("id") ON DELETE CASCADE ON UPDATE CASCADE' +
+          ')'
+      ),
+      prisma.$executeRawUnsafe(
+        'CREATE INDEX IF NOT EXISTS "account_folder_members_instagramAccountId_idx" ON "account_folder_members"("instagramAccountId")'
+      ),
+    ]);
+
+    const after = await inspectRodada8Schema();
+    const applied = {
+      tablesCreated: [
+        !before.foldersTable && after.foldersTable ? 'account_folders' : null,
+        !before.membersTable && after.membersTable ? 'account_folder_members' : null,
+      ].filter(Boolean),
+      indexesCreated: before.missingIndexes.filter((i) => !after.missingIndexes.includes(i)),
+    };
+
+    logger.info('Rodada 8 account folders migration applied', { applied, schema: after });
+
+    return res.json({
+      success: true,
+      data: {
+        applied,
+        schema: after,
+        message: 'Migração Rodada 8 concluída. Pastas de perfis liberadas - pode publicar o frontend.',
+      },
+    });
+  } catch (error) {
+    logger.error('Failed to apply Rodada 8 account folders migration', {
+      message: error.message,
+      code: error.code,
+      meta: error.meta,
+    });
+    return res.status(500).json({
+      success: false,
+      error: {
+        code: error.code || 'PRISMA_ERROR',
+        message: error.message,
+        details: error.meta || null,
+      },
+    });
+  }
+}
+
+router.get('/migrate-rodada8-account-folders', migrateRodada8AccountFolders);
+router.post('/migrate-rodada8-account-folders', migrateRodada8AccountFolders);
+
+async function inspectRodada8Schema() {
+  const tables = await prisma.$queryRaw`
+    SELECT table_name FROM information_schema.tables
+    WHERE table_schema = current_schema()
+      AND table_name IN ('account_folders', 'account_folder_members')
+  `;
+  const present = new Set(tables.map((t) => t.table_name));
+  const indexes = await prisma.$queryRaw`
+    SELECT indexname FROM pg_indexes
+    WHERE schemaname = current_schema()
+      AND tablename IN ('account_folders', 'account_folder_members')
+  `;
+  const presentIndexes = new Set(indexes.map((i) => i.indexname));
+  return {
+    foldersTable: present.has('account_folders'),
+    membersTable: present.has('account_folder_members'),
+    missingIndexes: RODADA8_INDEXES.filter((i) => !presentIndexes.has(i)),
+  };
+}
+
 async function inspectRodada7Schema() {
   const [table] = await prisma.$queryRaw`
     SELECT EXISTS (

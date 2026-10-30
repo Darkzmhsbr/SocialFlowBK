@@ -1058,6 +1058,8 @@ function normalizeListFilters(raw = {}) {
     instagramAccountId: raw.accountId || raw.instagramAccountId || undefined,
     types: types.length > 0 ? types : undefined,
     q: raw.q ? String(raw.q).slice(0, 100) : undefined,
+    // Rodada 8: filter by profile folder
+    accountFolderId: raw.folderId || raw.accountFolderId || undefined,
   };
 }
 

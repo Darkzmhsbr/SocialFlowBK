@@ -60,6 +60,12 @@
 //   - MediaAsset.folderId: one folder per media (null = "Sem pasta").
 //     Deleting a folder sets it to null (media stays in the library).
 //   Applied via POST|GET /api/setup/migrate-rodada7-library (idempotent SQL).
+//
+// Rodada 8 additions (profile folders):
+//   - AccountFolder: user-created groups of Instagram profiles ("Memes").
+//   - AccountFolderMember: many-to-many — a profile can be in several
+//     folders. Deleting a folder or a profile only removes the link.
+//   Applied via POST|GET /api/setup/migrate-rodada8-account-folders.
 
 generator client {
   provider = "prisma-client-js"
@@ -94,6 +100,9 @@ model User {
 
   // Rodada 7: media library folders
   mediaFolders   MediaFolder[]
+
+  // Rodada 8: profile folders
+  accountFolders AccountFolder[]
 
   @@map("users")
 }
@@ -135,6 +144,9 @@ model InstagramAccount {
   lastSyncAt DateTime?
 
   scheduledPosts ScheduledPost[]
+
+  // Rodada 8: folders this profile belongs to
+  folderMemberships AccountFolderMember[]
 
   @@index([userId])
   @@map("instagram_accounts")
@@ -349,4 +361,33 @@ model MediaFolder {
   @@unique([userId, name])
   @@index([userId])
   @@map("media_folders")
+}
+
+// --- Rodada 8: profile folders ---------------------------------------------
+
+model AccountFolder {
+  id        String                @id @default(uuid())
+  userId    String
+  user      User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name      String
+  createdAt DateTime              @default(now())
+  updatedAt DateTime              @updatedAt
+
+  members   AccountFolderMember[]
+
+  @@unique([userId, name])
+  @@index([userId])
+  @@map("account_folders")
+}
+
+model AccountFolderMember {
+  folderId           String
+  folder             AccountFolder    @relation(fields: [folderId], references: [id], onDelete: Cascade)
+  instagramAccountId String
+  instagramAccount   InstagramAccount @relation(fields: [instagramAccountId], references: [id], onDelete: Cascade)
+  createdAt          DateTime         @default(now())
+
+  @@id([folderId, instagramAccountId])
+  @@index([instagramAccountId])
+  @@map("account_folder_members")
 }

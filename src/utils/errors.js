@@ -80,6 +80,9 @@ const ErrorCodes = {
   // Rodada 7 - media library
   FOLDER_NOT_FOUND: 'FOLDER_NOT_FOUND',
   FOLDER_NAME_TAKEN: 'FOLDER_NAME_TAKEN',
+
+  // Rodada 8 - profile folders
+  ACCOUNT_FOLDER_NOT_FOUND: 'ACCOUNT_FOLDER_NOT_FOUND',
 };
 
 module.exports = { AppError, ErrorCodes };
