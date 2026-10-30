@@ -145,6 +145,16 @@ const env = {
     checkPublishingLimit: bool('CHECK_PUBLISHING_LIMIT', true),
   },
 
+  // Rodada 11 - platform administrators (comma-separated e-mails). Only
+  // they see/use the "Convites" page. Default keeps the owner as admin
+  // even before ADMIN_EMAILS is created on Railway.
+  admin: {
+    emails: String(process.env.ADMIN_EMAILS || 'dark@zenyxvips.com')
+      .split(',')
+      .map((e) => e.trim().toLowerCase())
+      .filter(Boolean),
+  },
+
   // Rodada 5 - periodic account health check (detects banned/restricted
   // accounts and expired tokens even with nothing scheduled) + automatic
   // long-lived token refresh before it expires.

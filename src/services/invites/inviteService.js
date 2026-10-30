@@ -100,10 +100,51 @@ function toPublicShape(invite) {
   };
 }
 
+// --- Rodada 11: admin page ------------------------------------------------
+
+// Direct Prisma (same pattern as mediaService.deleteIfOrphan) — the invite
+// repository file stays untouched.
+const prisma = require('../../config/database');
+
+function statusOf(invite) {
+  if (invite.usedById || invite.usedAt) return 'USED';
+  if (invite.expiresAt && new Date(invite.expiresAt) < new Date()) return 'EXPIRED';
+  return 'PENDING';
+}
+
+function listAll() {
+  return prisma.inviteCode.findMany({
+    orderBy: { createdAt: 'desc' },
+    take: 500,
+    include: {
+      usedBy: { select: { id: true, email: true, name: true } },
+      createdBy: { select: { id: true, email: true } },
+    },
+  });
+}
+
+/** Only unused invites can be revoked; used ones stay as history. */
+async function revoke(id) {
+  const invite = await prisma.inviteCode.findUnique({ where: { id } });
+  if (!invite) {
+    throw new AppError(ErrorCodes.INVITE_NOT_FOUND, 'Convite não encontrado.', 404);
+  }
+  if (invite.usedById) {
+    throw new AppError(ErrorCodes.INVITE_ALREADY_USED, 'Este convite já foi usado e não pode ser revogado.', 409);
+  }
+  await prisma.inviteCode.delete({ where: { id } });
+  logger.info('Invite revoked', { inviteId: id });
+  return { id };
+}
+
 module.exports = {
   createInvite,
   assertValidCode,
   markUsed,
   listByCreator,
   toPublicShape,
+  // Rodada 11
+  statusOf,
+  listAll,
+  revoke,
 };

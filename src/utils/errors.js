@@ -86,6 +86,10 @@ const ErrorCodes = {
 
   // Rodada 10 - own Meta app
   META_APP_INVALID: 'META_APP_INVALID',
+
+  // Rodada 11 - admin / invites
+  FORBIDDEN: 'FORBIDDEN',
+  INVITE_NOT_FOUND: 'INVITE_NOT_FOUND',
 };
 
 module.exports = { AppError, ErrorCodes };
