@@ -103,6 +103,9 @@ const ErrorCodes = {
   // Rodada 17 - monitoring / Telegram alerts
   TELEGRAM_NOT_CONFIGURED: 'TELEGRAM_NOT_CONFIGURED',
   TELEGRAM_INVALID: 'TELEGRAM_INVALID',
+
+  // Rodada 18 - performance
+  PERFORMANCE_INVALID: 'PERFORMANCE_INVALID',
 };
 
 module.exports = { AppError, ErrorCodes };

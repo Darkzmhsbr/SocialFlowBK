@@ -1268,6 +1268,180 @@ async function migrateRodada17Monitoring(req, res) {
 router.get('/migrate-rodada17-monitoring', migrateRodada17Monitoring);
 router.post('/migrate-rodada17-monitoring', migrateRodada17Monitoring);
 
+// GET  /api/setup/migrate-rodada18-performance?token=SEU_TOKEN   (pelo navegador)
+// POST /api/setup/migrate-rodada18-performance?token=SEU_TOKEN   (curl/Postman)
+//
+// Rodada 18 ("Desempenho" por post + melhores horários) schema migration:
+//   - scheduled_posts: permalink, mediaThumbnailUrl, performanceRatio,
+//     performanceValue, performanceMetric, performanceCheckpoint (nullable)
+//   - post_insight_snapshots: new table + FKs users / scheduled_posts /
+//     instagram_accounts (CASCADE) + unique (postId, checkpoint) + indexes
+// Names match what Prisma generates for schema.prisma (no drift).
+// Run RIGHT AFTER the backend deploy goes Active. Idempotent,
+// transactional, existing data untouched.
+const RODADA18_COLUMNS = [
+  ['permalink', 'TEXT'],
+  ['mediaThumbnailUrl', 'TEXT'],
+  ['performanceRatio', 'DOUBLE PRECISION'],
+  ['performanceValue', 'INTEGER'],
+  ['performanceMetric', 'TEXT'],
+  ['performanceCheckpoint', 'TEXT'],
+];
+const RODADA18_INDEXES = [
+  'post_insight_snapshots_postId_checkpoint_key',
+  'post_insight_snapshots_userId_publishedAt_idx',
+  'post_insight_snapshots_account_checkpoint_idx',
+];
+const RODADA18_FKS = [
+  'post_insight_snapshots_userId_fkey',
+  'post_insight_snapshots_postId_fkey',
+  'post_insight_snapshots_instagramAccountId_fkey',
+];
+
+async function migrateRodada18Performance(req, res) {
+  if (!assertSetupToken(req, res)) return;
+
+  try {
+    const before = await inspectRodada18Schema();
+    if (
+      before.missingColumns.length === 0 &&
+      before.table &&
+      before.missingIndexes.length === 0 &&
+      before.missingForeignKeys.length === 0
+    ) {
+      return res.json({
+        success: true,
+        data: {
+          applied: { columnsAdded: [], tablesCreated: [], indexesCreated: [], foreignKeysCreated: [] },
+          schema: before,
+          message: 'Nada a migrar. O desempenho por post já existe.',
+        },
+      });
+    }
+
+    const fk = (name, column, table) =>
+      prisma.$executeRawUnsafe(
+        'DO $$ BEGIN ' +
+          `IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = '${name}') THEN ` +
+          `ALTER TABLE "post_insight_snapshots" ADD CONSTRAINT "${name}" ` +
+          `FOREIGN KEY ("${column}") REFERENCES "${table}"("id") ON DELETE CASCADE ON UPDATE CASCADE; ` +
+          'END IF; END $$;'
+      );
+
+    await prisma.$transaction([
+      ...RODADA18_COLUMNS.map(([col, type]) =>
+        prisma.$executeRawUnsafe(`ALTER TABLE "scheduled_posts" ADD COLUMN IF NOT EXISTS "${col}" ${type}`)
+      ),
+      prisma.$executeRawUnsafe(
+        'CREATE TABLE IF NOT EXISTS "post_insight_snapshots" (' +
+          '"id" TEXT NOT NULL, ' +
+          '"userId" TEXT NOT NULL, ' +
+          '"postId" TEXT NOT NULL, ' +
+          '"instagramAccountId" TEXT NOT NULL, ' +
+          '"checkpoint" TEXT NOT NULL, ' +
+          '"postType" TEXT NOT NULL, ' +
+          '"publishedAt" TIMESTAMP(3) NOT NULL, ' +
+          '"ok" BOOLEAN NOT NULL DEFAULT true, ' +
+          '"reach" INTEGER, ' +
+          '"views" INTEGER, ' +
+          '"likes" INTEGER, ' +
+          '"comments" INTEGER, ' +
+          '"saves" INTEGER, ' +
+          '"shares" INTEGER, ' +
+          '"totalInteractions" INTEGER, ' +
+          '"avgWatchTimeMs" INTEGER, ' +
+          '"replies" INTEGER, ' +
+          '"follows" INTEGER, ' +
+          '"profileVisits" INTEGER, ' +
+          '"collectedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP, ' +
+          'CONSTRAINT "post_insight_snapshots_pkey" PRIMARY KEY ("id")' +
+          ')'
+      ),
+      prisma.$executeRawUnsafe(
+        'CREATE UNIQUE INDEX IF NOT EXISTS "post_insight_snapshots_postId_checkpoint_key" ' +
+          'ON "post_insight_snapshots"("postId", "checkpoint")'
+      ),
+      prisma.$executeRawUnsafe(
+        'CREATE INDEX IF NOT EXISTS "post_insight_snapshots_userId_publishedAt_idx" ' +
+          'ON "post_insight_snapshots"("userId", "publishedAt")'
+      ),
+      prisma.$executeRawUnsafe(
+        'CREATE INDEX IF NOT EXISTS "post_insight_snapshots_account_checkpoint_idx" ' +
+          'ON "post_insight_snapshots"("instagramAccountId", "checkpoint", "publishedAt")'
+      ),
+      fk('post_insight_snapshots_userId_fkey', 'userId', 'users'),
+      fk('post_insight_snapshots_postId_fkey', 'postId', 'scheduled_posts'),
+      fk('post_insight_snapshots_instagramAccountId_fkey', 'instagramAccountId', 'instagram_accounts'),
+    ]);
+
+    const after = await inspectRodada18Schema();
+    const applied = {
+      columnsAdded: before.missingColumns.filter((c) => !after.missingColumns.includes(c)),
+      tablesCreated: !before.table && after.table ? ['post_insight_snapshots'] : [],
+      indexesCreated: before.missingIndexes.filter((i) => !after.missingIndexes.includes(i)),
+      foreignKeysCreated: before.missingForeignKeys.filter((f) => !after.missingForeignKeys.includes(f)),
+    };
+
+    logger.info('Rodada 18 performance migration applied', { applied, schema: after });
+
+    return res.json({
+      success: true,
+      data: {
+        applied,
+        schema: after,
+        message: 'Migração Rodada 18 concluída. Desempenho por post liberado - pode publicar o frontend.',
+      },
+    });
+  } catch (error) {
+    logger.error('Failed to apply Rodada 18 performance migration', {
+      message: error.message,
+      code: error.code,
+      meta: error.meta,
+    });
+    return res.status(500).json({
+      success: false,
+      error: {
+        code: error.code || 'PRISMA_ERROR',
+        message: error.message,
+        details: error.meta || null,
+      },
+    });
+  }
+}
+
+router.get('/migrate-rodada18-performance', migrateRodada18Performance);
+router.post('/migrate-rodada18-performance', migrateRodada18Performance);
+
+async function inspectRodada18Schema() {
+  const columns = await prisma.$queryRaw`
+    SELECT column_name::text AS column_name FROM information_schema.columns
+    WHERE table_schema = current_schema() AND table_name = 'scheduled_posts'
+  `;
+  const presentColumns = new Set(columns.map((c) => c.column_name));
+  const [table] = await prisma.$queryRaw`
+    SELECT EXISTS (
+      SELECT 1 FROM information_schema.tables
+      WHERE table_schema = current_schema() AND table_name = 'post_insight_snapshots'
+    ) AS "exists"
+  `;
+  const indexes = await prisma.$queryRaw`
+    SELECT indexname::text AS indexname FROM pg_indexes
+    WHERE schemaname = current_schema() AND tablename = 'post_insight_snapshots'
+  `;
+  const fks = await prisma.$queryRaw`
+    SELECT conname::text AS conname FROM pg_constraint
+    WHERE conname IN ('post_insight_snapshots_userId_fkey', 'post_insight_snapshots_postId_fkey', 'post_insight_snapshots_instagramAccountId_fkey')
+  `;
+  const presentIndexes = new Set(indexes.map((i) => i.indexname));
+  const presentFks = new Set(fks.map((f) => f.conname));
+  return {
+    missingColumns: RODADA18_COLUMNS.map(([c]) => c).filter((c) => !presentColumns.has(c)),
+    table: Boolean(table?.exists),
+    missingIndexes: RODADA18_INDEXES.filter((i) => !presentIndexes.has(i)),
+    missingForeignKeys: RODADA18_FKS.filter((f) => !presentFks.has(f)),
+  };
+}
+
 async function inspectRodada17Schema() {
   const [table] = await prisma.$queryRaw`
     SELECT EXISTS (

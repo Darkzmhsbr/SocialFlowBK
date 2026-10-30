@@ -42,6 +42,8 @@ const metricsService = require('../services/metrics/metricsService');
 // Rodada 17: Monitoramento (alerts) + official Telegram alerts bot.
 const monitoringService = require('../services/monitoring/monitoringService');
 const telegramService = require('../services/telegram/telegramService');
+// Rodada 18: per-post metrics at 24h / 3d / 7d / 30d ("Desempenho").
+const performanceService = require('../services/performance/performanceService');
 
 let isTicking = false;
 let task = null;
@@ -218,6 +220,8 @@ function start() {
   // Rodada 17
   monitoringService.startMonitor();
   telegramService.start().catch(() => {});
+  // Rodada 18
+  performanceService.startCollector();
 }
 
 function stop() {
@@ -235,6 +239,8 @@ function stop() {
   // Rodada 17
   monitoringService.stopMonitor();
   telegramService.stop();
+  // Rodada 18
+  performanceService.stopCollector();
 }
 
 module.exports = { start, stop, tick };

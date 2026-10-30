@@ -20,6 +20,8 @@ const templatesRoutes = require('./templatesRoutes');
 // Rodada 17
 const monitoringRoutes = require('./monitoringRoutes');
 const telegramRoutes = require('./telegramRoutes');
+// Rodada 18
+const performanceRoutes = require('./performanceRoutes');
 
 const router = Router();
 
@@ -38,5 +40,6 @@ router.use('/metrics', metricsRoutes); // -> /api/metrics/* (Rodada 13)
 router.use('/templates', templatesRoutes); // -> /api/templates/* (Rodada 16)
 router.use('/monitoring', monitoringRoutes); // -> /api/monitoring/* (Rodada 17)
 router.use('/telegram', telegramRoutes); // -> /api/telegram/* (Rodada 17)
+router.use('/performance', performanceRoutes); // -> /api/performance/* (Rodada 18)
 
 module.exports = router;

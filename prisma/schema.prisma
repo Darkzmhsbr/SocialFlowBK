@@ -137,6 +137,9 @@ model User {
   // Rodada 17: where this user's alerts go on Telegram
   telegramLink TelegramLink?
 
+  // Rodada 18: per-post metrics snapshots
+  postInsightSnapshots PostInsightSnapshot[]
+
   @@map("users")
 }
 
@@ -187,6 +190,9 @@ model InstagramAccount {
 
   // Rodada 13: daily metrics snapshots
   insightSnapshots AccountInsightSnapshot[]
+
+  // Rodada 18: per-post metrics snapshots
+  postInsightSnapshots PostInsightSnapshot[]
 
   @@index([userId])
   @@index([metaAppCredentialId])
@@ -307,6 +313,17 @@ model ScheduledPost {
   // worker never reads this field — each post is still published on its
   // own, so a failure on one account never affects the others.
   batchId            String?
+
+  // Rodada 18: post performance. Link + thumbnail from Meta (still shown
+  // after a cleanup frees the file) and the latest result compared with the
+  // profile's own average (ratio 2.1 = 2.1x the average).
+  permalink              String?   @db.Text
+  mediaThumbnailUrl      String?   @db.Text
+  performanceRatio       Float?
+  performanceValue       Int?
+  performanceMetric      String?
+  performanceCheckpoint  String?
+  postInsightSnapshots   PostInsightSnapshot[]
 
   createdAt          DateTime            @default(now())
   updatedAt          DateTime            @updatedAt
@@ -593,4 +610,40 @@ model TelegramLink {
 
   @@index([chatId])
   @@map("telegram_links")
+}
+
+// Rodada 18: metrics of one published post at fixed checkpoints after
+// publishing ('24h', '3d', '7d', '30d'), plus 'now' for posts that were
+// already published when the collection started. Same checkpoint = fair
+// comparison between posts of different ages. ok = false when Meta gave no
+// metrics (no permission / post deleted) — not retried.
+model PostInsightSnapshot {
+  id                 String           @id @default(uuid())
+  userId             String
+  user               User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  postId             String
+  post               ScheduledPost    @relation(fields: [postId], references: [id], onDelete: Cascade)
+  instagramAccountId String
+  instagramAccount   InstagramAccount @relation(fields: [instagramAccountId], references: [id], onDelete: Cascade)
+  checkpoint         String
+  postType           String
+  publishedAt        DateTime
+  ok                 Boolean          @default(true)
+  reach              Int?
+  views              Int?
+  likes              Int?
+  comments           Int?
+  saves              Int?
+  shares             Int?
+  totalInteractions  Int?
+  avgWatchTimeMs     Int?
+  replies            Int?
+  follows            Int?
+  profileVisits      Int?
+  collectedAt        DateTime         @default(now())
+
+  @@unique([postId, checkpoint])
+  @@index([userId, publishedAt])
+  @@index([instagramAccountId, checkpoint, publishedAt], map: "post_insight_snapshots_account_checkpoint_idx")
+  @@map("post_insight_snapshots")
 }

@@ -339,6 +339,33 @@ function toAppError(error, contextMessage) {
   return new AppError(ErrorCodes.META_API_ERROR, 'Não foi possível comunicar com o Instagram.', 502);
 }
 
+// --- Rodada 18: media info (permalink + thumbnail) -----------------------
+
+/**
+ * Public link and preview image of a published media. thumbnail_url only
+ * exists for videos/Reels; for images media_url is the picture itself.
+ * @returns {Promise<{ permalink: string|null, thumbnailUrl: string|null }>}
+ */
+async function fetchMediaInfo(mediaId, accessToken) {
+  try {
+    const { data } = await axios.get(`${apiBase()}/${mediaId}`, {
+      params: {
+        fields: 'permalink,thumbnail_url,media_url,media_type',
+        access_token: accessToken,
+      },
+      timeout: 15000,
+    });
+    const isVideo = data?.media_type === 'VIDEO' || data?.media_type === 'REELS';
+    return {
+      permalink: data?.permalink || null,
+      thumbnailUrl: data?.thumbnail_url || (isVideo ? null : data?.media_url) || null,
+    };
+  } catch (error) {
+    if (error instanceof AppError) throw error;
+    throw toAppError(error, 'Failed to fetch Instagram media info');
+  }
+}
+
 // --- Rodada 13: account metrics (Dashboard) ------------------------------
 
 /**
@@ -450,4 +477,6 @@ module.exports = {
   // Rodada 13
   fetchAccountStats,
   fetchAccountInsights,
+  // Rodada 18
+  fetchMediaInfo,
 };

@@ -510,6 +510,17 @@ function toPublicShape(post) {
           height: post.coverMediaAsset.height,
         }
       : null,
+    // Rodada 18: link on Instagram + latest result vs the profile average
+    permalink: post.permalink ?? null,
+    performance:
+      post.performanceCheckpoint != null
+        ? {
+            ratio: post.performanceRatio,
+            value: post.performanceValue,
+            metric: post.performanceMetric,
+            checkpoint: post.performanceCheckpoint,
+          }
+        : null,
     createdAt: post.createdAt,
     updatedAt: post.updatedAt,
   };

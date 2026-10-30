@@ -82,6 +82,12 @@ async function getInsights({ postId, userId, forceRefresh = false }) {
     );
   }
 
+  // Rodada 18: evolution (24h -> 3d -> 7d -> 30d) + result vs the profile
+  // average, from the automatic collection. Lazy require (circular import).
+  const performanceExtra = await require('../performance/performanceService')
+    .postHistory(postId)
+    .catch(() => ({}));
+
   // Cache hit?
   if (!forceRefresh && isCacheFresh(post.insightsUpdatedAt)) {
     logger.info('Insights cache hit', { postId, cachedAt: post.insightsUpdatedAt });
@@ -89,6 +95,7 @@ async function getInsights({ postId, userId, forceRefresh = false }) {
       insights: toPublicInsights(post.insightsData, post.type),
       cachedAt: post.insightsUpdatedAt?.toISOString() ?? null,
       isStale: false,
+      ...performanceExtra, // Rodada 18
     };
   }
 
@@ -130,6 +137,7 @@ async function getInsights({ postId, userId, forceRefresh = false }) {
     cachedAt: now.toISOString(),
     isStale: false,
     ...(allZero && isVeryRecent ? { notice: 'INSIGHTS_NOT_YET_READY' } : {}),
+    ...performanceExtra, // Rodada 18
   };
 }
 
@@ -236,3 +244,5 @@ function handleFetchError(err, post) {
 }
 
 module.exports = { getInsights };
+// Rodada 18: the automatic per-post collection uses the same metric lists.
+module.exports.METRICS_BY_TYPE = METRICS_BY_TYPE;

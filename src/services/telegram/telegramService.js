@@ -27,6 +27,8 @@ const ALERT_TYPES = [
   { key: 'TOKEN_EXPIRING', label: 'Autorização de perfil perto de vencer', default: true },
   { key: 'QUEUE_EMPTY', label: 'Perfis ativos sem posts agendados (fim da tarde)', default: true },
   { key: 'BATCH_COMPLETED', label: 'Lote concluído', default: true },
+  // Rodada 18
+  { key: 'POST_VIRAL', label: 'Post viral (muito acima da média do perfil em 24h)', default: true },
   { key: 'CLEANUP_FINISHED', label: 'Limpeza concluída', default: false },
   { key: 'DAILY_SUMMARY', label: 'Resumo do dia (21h)', default: false },
 ];
