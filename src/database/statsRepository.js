@@ -4,6 +4,22 @@
 
 const prisma = require('../config/database');
 
+// Correção de fuso: the server runs in UTC, but "today" / "this month" are
+// counted in Brasília time (UTC-3, no daylight saving since 2019). Without
+// this, posts created after 21:00 showed up on the next day.
+const SP_OFFSET_MS = 3 * 60 * 60 * 1000;
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+// Brasília calendar day (YYYY-MM-DD) of an instant.
+function spDay(date) {
+  return new Date(date.getTime() - SP_OFFSET_MS).toISOString().slice(0, 10);
+}
+
+// Real instant (UTC) when a Brasília calendar day starts (00:00 in Brasília).
+function spDayStart(day) {
+  return new Date(Date.parse(`${day}T00:00:00Z`) + SP_OFFSET_MS);
+}
+
 function countConnectedAccounts(userId) {
   return prisma.instagramAccount.count({
     where: { userId, status: 'ACTIVE' },
@@ -17,8 +33,9 @@ function countPostsByStatus(userId, statuses) {
 }
 
 function countPublishedThisMonth(userId) {
-  const now = new Date();
-  const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+  // Correção de fuso: day 1 of the current month at 00:00 Brasília time
+  // (was midnight of the server, i.e. 21:00 of the previous day in Brasília).
+  const startOfMonth = spDayStart(`${spDay(new Date()).slice(0, 7)}-01`);
   return prisma.scheduledPost.count({
     where: {
       userId,
@@ -37,27 +54,33 @@ function countPublishedThisMonth(userId) {
  * window present (zero-filled for days with no posts).
  */
 async function getDailyActivity(userId, days = 14) {
+  // Correção de fuso: days are Brasília days. "createdAt" is stored in UTC,
+  // so we subtract 3 hours before taking the date, and the window starts at
+  // 00:00 (Brasília) of the first day shown in the chart.
+  const todayKey = spDay(new Date());
+  const firstDay = new Date(Date.parse(`${todayKey}T00:00:00Z`) - (days - 1) * DAY_MS).toISOString().slice(0, 10);
+  const windowStart = spDayStart(firstDay);
   const raw = await prisma.$queryRaw`
     SELECT
-      TO_CHAR(DATE("createdAt"), 'YYYY-MM-DD') AS date,
+      TO_CHAR(DATE("createdAt" - INTERVAL '3 hours'), 'YYYY-MM-DD') AS date,
       COUNT(*)::int AS count
     FROM "scheduled_posts"
     WHERE "userId" = ${userId}
-      AND "createdAt" >= NOW() - (${days}::int || ' days')::interval
-    GROUP BY DATE("createdAt")
-    ORDER BY DATE("createdAt") ASC
+      AND "createdAt" >= ${windowStart}
+    GROUP BY DATE("createdAt" - INTERVAL '3 hours')
+    ORDER BY DATE("createdAt" - INTERVAL '3 hours') ASC
   `;
 
   // Zero-fill the days that had no posts so the chart shows a full window
   // instead of collapsing gaps.
   const byDate = new Map(raw.map((row) => [row.date, row.count]));
   const filled = [];
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
+  // Correção de fuso: walk the Brasília days (was the server's day).
+  const today = new Date(`${todayKey}T00:00:00Z`);
 
   for (let i = days - 1; i >= 0; i--) {
     const d = new Date(today);
-    d.setDate(d.getDate() - i);
+    d.setUTCDate(d.getUTCDate() - i);
     const key = d.toISOString().slice(0, 10); // YYYY-MM-DD
     filled.push({ date: key, count: byDate.get(key) || 0 });
   }
