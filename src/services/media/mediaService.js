@@ -2,6 +2,7 @@
 // only cares about HTTP) and the storage provider + Prisma. Every rule
 // that decides "is this file allowed?" lives here.
 
+const crypto = require('crypto');
 const cloudinaryClient = require('../../integrations/cloudinary/cloudinaryClient');
 const b2Client = require('../../integrations/backblaze/b2Client');
 const mediaRepository = require('../../database/mediaRepository');
@@ -32,9 +33,11 @@ const DEFAULT_PROVIDER = 'BACKBLAZE';
  * @param {object} args
  * @param {string} args.userId
  * @param {{ buffer: Buffer, mimetype: string, size: number, originalname: string }} args.file - req.file from multer
+ * @param {string} [args.region] - optional Brazilian state/city filter for GPS spoofing
+ * @param {string} [args.deviceBrand] - optional 'IPHONE' | 'ANDROID' filter for device spoofing
  * @returns {Promise<MediaAsset>}
  */
-async function uploadFile({ userId, file }) {
+async function uploadFile({ userId, file, region, deviceBrand }) {
   if (!file || !file.buffer) {
     throw new AppError(ErrorCodes.NO_FILE_UPLOADED, 'Nenhum arquivo enviado.', 400);
   }
@@ -51,14 +54,26 @@ async function uploadFile({ userId, file }) {
     provider: DEFAULT_PROVIDER,
   });
 
-  // Rodada 20: remove metadata (no re-encoding, same quality). Never fails:
-  // on any problem the original file is stored.
-  const clean = await stripMetadata({ buffer: file.buffer, mimetype: file.mimetype });
+  // Rodada 20: remove metadata (no re-encoding, same quality) + spoof random
+  // iPhone/Android metadata, random Brazil location, and mutate file hash.
+  // Never fails: on any problem the original file is stored.
+  const hashBefore = crypto.createHash('sha256').update(file.buffer).digest('hex').slice(0, 16);
+  const clean = await stripMetadata({
+    buffer: file.buffer,
+    mimetype: file.mimetype,
+    region,
+    deviceBrand,
+  });
   if (clean.stripped) {
-    logger.info('Media metadata removed', {
+    const hashAfter = crypto.createHash('sha256').update(clean.buffer).digest('hex').slice(0, 16);
+    logger.info('Media metadata removed and spoofed', {
       userId,
       filename: file.originalname,
       removed: clean.removed,
+      spoofedDevice: clean.spoofed ? `${clean.spoofed.make} ${clean.spoofed.model}` : null,
+      spoofedLocation: clean.spoofed ? `${clean.spoofed.city} - ${clean.spoofed.state}` : null,
+      hashBefore,
+      hashAfter,
       bytesBefore: file.buffer.length,
       bytesAfter: clean.buffer.length,
     });

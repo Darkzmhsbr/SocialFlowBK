@@ -6,6 +6,8 @@ const uploadMedia = async (req, res) => {
   const asset = await mediaService.uploadFile({
     userId: req.userId,
     file: req.file,
+    region: req.body?.region ? String(req.body.region) : undefined,
+    deviceBrand: req.body?.device ? String(req.body.device) : undefined,
   });
   // Rodada 7: multipart fields "library=1" (+ optional "folderId") keep the
   // upload in the library (Biblioteca page and cover picker).
