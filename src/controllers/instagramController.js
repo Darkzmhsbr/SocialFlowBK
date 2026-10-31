@@ -13,10 +13,26 @@ const metaAppService = require('../services/instagram/metaAppService');
 // GET /connect that used to redirect directly - that pattern doesn't
 // work anymore because the browser navigation drops the Bearer token,
 // so the server had no way to know who started the flow.
+// Rodada 20: ?mode=external -> link to copy and open in another browser
+// (Dolphin/multilogin). It expires in 5 minutes and, at the end, shows the
+// public page /connected instead of the dashboard.
 const getAuthorizeUrl = async (req, res) => {
-  const { url } = await authService.startOAuthFlow(req.userId); // Rodada 10: now async
-  return ok(res, { url });
+  const external = req.query.mode === 'external'; // Rodada 20
+  const { url, expiresAt } = await authService.startOAuthFlow(req.userId, { external }); // Rodada 10: now async
+  return ok(res, { url, expiresAt, external }); // Rodada 20: + expiresAt, external
 };
+
+// Rodada 20: where the browser goes after the callback.
+//   external link  -> public page /connected (works without being logged in)
+//   same tab       -> dashboard, exactly as before
+function callbackRedirect(external, status, username) {
+  if (external) {
+    const q = new URLSearchParams({ status });
+    if (username) q.set('username', username);
+    return `${env.frontendUrl}/connected?${q.toString()}`;
+  }
+  return `${env.frontendUrl}/dashboard?instagram=${status}`;
+}
 
 // GET /api/instagram/callback?code=...&state=...
 // Public route (Meta calls it with no Authorization header). The user is
@@ -34,7 +50,8 @@ const handleCallback = async (req, res) => {
       errorDescription,
       requestId: req.requestId,
     });
-    return res.redirect(`${env.frontendUrl}/dashboard?instagram=denied`);
+    const discarded = authService.discardState(state); // Rodada 20
+    return res.redirect(callbackRedirect(discarded?.external, 'denied')); // Rodada 20: was `${env.frontendUrl}/dashboard?instagram=denied`
   }
 
   // Rodada 10: which app started this flow (null = default app).
@@ -51,7 +68,7 @@ const handleCallback = async (req, res) => {
     const { accessToken, tokenExpiresAt } = await authService.completeOAuthFlow(code, {
       metaAppCredentialId: stateInfo.metaAppCredentialId,
     }); // Rodada 10: was completeOAuthFlow(code)
-    await accountService.connectAndStoreAccount({
+    const connected = await accountService.connectAndStoreAccount({ // Rodada 20: keeps the result (username)
       userId,
       accessToken,
       tokenExpiresAt,
@@ -62,7 +79,7 @@ const handleCallback = async (req, res) => {
       await metaAppService.markVerified(stateInfo.metaAppCredentialId);
     }
 
-    return res.redirect(`${env.frontendUrl}/dashboard?instagram=connected`);
+    return res.redirect(callbackRedirect(stateInfo.external, 'connected', connected?.username)); // Rodada 20: was `${env.frontendUrl}/dashboard?instagram=connected`
   } catch (err) {
     // Instead of returning a JSON error (Meta redirected the browser here,
     // so the user is watching), send them back to the dashboard with an
@@ -75,7 +92,12 @@ const handleCallback = async (req, res) => {
     if (stateInfo?.metaAppCredentialId) {
       await metaAppService.recordError(stateInfo.metaAppCredentialId, err).catch(() => {});
     }
-    return res.redirect(`${env.frontendUrl}/dashboard?instagram=error`);
+    // Rodada 20: link expired/already used -> public page explains it
+    // (works in any browser, logged in or not).
+    if (!stateInfo) {
+      return res.redirect(`${env.frontendUrl}/connected?status=expired`);
+    }
+    return res.redirect(callbackRedirect(stateInfo.external, 'error')); // Rodada 20: was `${env.frontendUrl}/dashboard?instagram=error`
   }
 };
 

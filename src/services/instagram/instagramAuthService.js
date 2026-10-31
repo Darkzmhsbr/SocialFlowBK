@@ -28,6 +28,8 @@ const metaAppService = require('./metaAppService');
 // state -> { userId, expiresAt }
 const pendingStates = new Map();
 const STATE_TTL_MS = 10 * 60 * 1000; // 10 minutes
+// Rodada 20: copied link (multilogin, opened in another browser) lives 5 min.
+const EXTERNAL_STATE_TTL_MS = 5 * 60 * 1000;
 
 /**
  * Kick off an OAuth flow for a specific user. Returns the URL the browser
@@ -36,7 +38,10 @@ const STATE_TTL_MS = 10 * 60 * 1000; // 10 minutes
  * the callback uses to know whose InstagramAccount to create.
  */
 // Rodada 10: now async (looks up the user's own app). Callers await it.
-async function startOAuthFlow(userId) {
+// Rodada 20: options.external = link copied to be opened in another browser
+// (Dolphin/multilogin). The callback then shows a public "done" page
+// instead of the dashboard (that browser is not logged in the panel).
+async function startOAuthFlow(userId, { external = false } = {}) {
   if (!userId) {
     throw new AppError(
       ErrorCodes.UNAUTHORIZED,
@@ -48,10 +53,12 @@ async function startOAuthFlow(userId) {
   const state = crypto.randomBytes(24).toString('hex');
   // Rodada 10: own app, if configured (null = default app).
   const ownApp = await metaAppService.getAppForUser(userId);
+  const expiresAt = Date.now() + (external ? EXTERNAL_STATE_TTL_MS : STATE_TTL_MS); // Rodada 20
   pendingStates.set(state, {
     userId,
-    expiresAt: Date.now() + STATE_TTL_MS,
+    expiresAt, // Rodada 20: was Date.now() + STATE_TTL_MS
     metaAppCredentialId: ownApp?.credentialId || null,
+    external: Boolean(external), // Rodada 20
   });
 
   // Opportunistic cleanup so the Map doesn't grow forever if a user
@@ -59,8 +66,8 @@ async function startOAuthFlow(userId) {
   purgeExpiredStates();
 
   const url = instagramApiClient.buildAuthorizationUrl(state, ownApp); // Rodada 10: was (state)
-  logger.info('Instagram OAuth started', { userId, state, ownApp: Boolean(ownApp) });
-  return { url, state };
+  logger.info('Instagram OAuth started', { userId, state, ownApp: Boolean(ownApp), external: Boolean(external) });
+  return { url, state, expiresAt: new Date(expiresAt) }; // Rodada 20: + expiresAt
 }
 
 /**
@@ -79,14 +86,32 @@ function consumeState(state) {
     throw new AppError(ErrorCodes.INVALID_TOKEN, 'State inválido ou já utilizado.', 400);
   }
   if (entry.expiresAt <= Date.now()) {
-    throw new AppError(
+    const expired = new AppError(
       ErrorCodes.TOKEN_EXPIRED,
       'Tempo para completar a autenticação expirou. Tente novamente.',
       400
     );
+    expired.external = Boolean(entry.external); // Rodada 20
+    throw expired;
   }
   // Rodada 10: also returns which app started the flow.
-  return { userId: entry.userId, metaAppCredentialId: entry.metaAppCredentialId || null };
+  // Rodada 20: + external (copied link)
+  return {
+    userId: entry.userId,
+    metaAppCredentialId: entry.metaAppCredentialId || null,
+    external: Boolean(entry.external),
+  };
+}
+
+/**
+ * Rodada 20: the user cancelled on Meta's screen. Throws the state away and
+ * tells the callback whether it was a copied (external) link.
+ */
+function discardState(state) {
+  if (!state) return null;
+  const entry = pendingStates.get(state);
+  pendingStates.delete(state);
+  return entry ? { external: Boolean(entry.external) } : null;
 }
 
 function purgeExpiredStates() {
@@ -128,4 +153,4 @@ async function completeOAuthFlow(code, { metaAppCredentialId = null } = {}) { //
   };
 }
 
-module.exports = { startOAuthFlow, consumeState, completeOAuthFlow };
+module.exports = { startOAuthFlow, consumeState, completeOAuthFlow, discardState }; // Rodada 20: + discardState

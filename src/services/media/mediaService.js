@@ -8,6 +8,8 @@ const mediaRepository = require('../../database/mediaRepository');
 const env = require('../../config/env');
 const { AppError, ErrorCodes } = require('../../utils/errors');
 const logger = require('../../utils/logger');
+// Rodada 20: strip private metadata (GPS, phone model, date) before storing.
+const { stripMetadata } = require('./metadataStripper');
 
 // Direct Prisma access — used only by deleteIfOrphan to count references
 // from PostMedia AND from ScheduledPost.coverMediaAssetId (Rodada 2b).
@@ -49,9 +51,22 @@ async function uploadFile({ userId, file }) {
     provider: DEFAULT_PROVIDER,
   });
 
+  // Rodada 20: remove metadata (no re-encoding, same quality). Never fails:
+  // on any problem the original file is stored.
+  const clean = await stripMetadata({ buffer: file.buffer, mimetype: file.mimetype });
+  if (clean.stripped) {
+    logger.info('Media metadata removed', {
+      userId,
+      filename: file.originalname,
+      removed: clean.removed,
+      bytesBefore: file.buffer.length,
+      bytesAfter: clean.buffer.length,
+    });
+  }
+
   // New uploads always go to Backblaze. Cloudinary is kept only for
   // deleting legacy rows via deleteAsset below.
-  const uploaded = await b2Client.uploadBuffer(file.buffer, {
+  const uploaded = await b2Client.uploadBuffer(clean.buffer, { // Rodada 20: was file.buffer
     userId,
     resourceType,
     mimetype: file.mimetype,
