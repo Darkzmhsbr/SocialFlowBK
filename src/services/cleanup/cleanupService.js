@@ -20,6 +20,8 @@ const mediaService = require('../media/mediaService');
 const notificationService = require('../notifications/notificationService');
 const { AppError, ErrorCodes } = require('../../utils/errors');
 const logger = require('../../utils/logger');
+// Rodada 21: platform default / mandatory cleanup + abandoned-upload sweep
+const storageService = require('../storage/storageService');
 
 const ACTIONS = ['DELETE_POSTS', 'ARCHIVE_POSTS', 'FREE_STORAGE'];
 const STATUSES = ['DRAFT', 'SCHEDULED', 'QUEUED', 'PUBLISHING', 'PUBLISHED', 'FAILED', 'ARCHIVED'];
@@ -192,12 +194,26 @@ async function cancelJob(id, userId) {
   return job;
 }
 
+// Rodada 21: "liberar armazenamento" that really applies to this user:
+//   - never chose (no row, or row following the default) -> platform default
+//   - mandatory (maxFreeStorageDays) -> never off, never above the maximum
+function effectiveFreeDays(row, platform) {
+  let days = !row || row.freeStorageFromDefault ? platform.defaultFreeStorageDays : row.freeStorageAfterDays;
+  if (platform.maxFreeStorageDays) days = days ? Math.min(days, platform.maxFreeStorageDays) : platform.maxFreeStorageDays;
+  return days || null;
+}
+
 async function getSettings(userId) {
   const s = await prisma.cleanupSetting.findUnique({ where: { userId } });
+  const platform = await storageService.getPlatformSettings(); // Rodada 21
   return {
-    freeStorageAfterDays: s?.freeStorageAfterDays ?? null,
+    freeStorageAfterDays: effectiveFreeDays(s, platform), // Rodada 21: was s?.freeStorageAfterDays ?? null
     archiveFailedAfterDays: s?.archiveFailedAfterDays ?? null,
     lastAutoRunAt: s?.lastAutoRunAt ?? null,
+    // Rodada 21: shown on the Limpeza page
+    freeStorageIsDefault: !s || Boolean(s.freeStorageFromDefault),
+    defaultFreeStorageDays: platform.defaultFreeStorageDays,
+    maxFreeStorageDays: platform.maxFreeStorageDays,
   };
 }
 
@@ -214,7 +230,17 @@ async function saveSettings(userId, body = {}) {
   const data = {
     freeStorageAfterDays: cleanDays(body.freeStorageAfterDays),
     archiveFailedAfterDays: cleanDays(body.archiveFailedAfterDays),
+    freeStorageFromDefault: false, // Rodada 21: the user chose
   };
+  // Rodada 21: mandatory cleanup set by the admin.
+  const platform = await storageService.getPlatformSettings();
+  if (platform.maxFreeStorageDays && (!data.freeStorageAfterDays || data.freeStorageAfterDays > platform.maxFreeStorageDays)) {
+    throw new AppError(
+      ErrorCodes.CLEANUP_INVALID,
+      `A liberação automática é obrigatória nesta plataforma: escolha no máximo ${platform.maxFreeStorageDays} dias.`,
+      400
+    );
+  }
   await prisma.cleanupSetting.upsert({ where: { userId }, update: data, create: { userId, ...data } });
   return getSettings(userId);
 }
@@ -225,6 +251,7 @@ async function saveSettings(userId, body = {}) {
 
 let runnerTimer = null;
 let autoTimer = null;
+let sweepTimer = null; // Rodada 21: abandoned uploads
 let running = false;
 
 async function runnerTick() {
@@ -474,17 +501,37 @@ async function notifyFinished(jobId) {
 async function autoTick() {
   try {
     const dueBefore = new Date(Date.now() - AUTO_EVERY_MS);
+    // Rodada 21: users who never opened the rules follow the platform
+    // default (or the mandatory rule): give them a settings row first.
+    const platform = await storageService.getPlatformSettings({ fresh: true });
+    const platformRule = Boolean(platform.defaultFreeStorageDays || platform.maxFreeStorageDays);
+    if (platformRule) {
+      const withoutRow = await prisma.user.findMany({
+        where: { cleanupSetting: null, scheduledPosts: { some: { status: 'PUBLISHED' } } },
+        select: { id: true },
+        take: 200,
+      });
+      for (const u of withoutRow) {
+        await prisma.cleanupSetting
+          .create({ data: { userId: u.id, freeStorageAfterDays: null, archiveFailedAfterDays: null, freeStorageFromDefault: true } })
+          .catch(() => {});
+      }
+    }
+    const ruleFilters = [{ freeStorageAfterDays: { not: null } }, { archiveFailedAfterDays: { not: null } }];
+    if (platform.defaultFreeStorageDays) ruleFilters.push({ freeStorageFromDefault: true }); // Rodada 21
     const settings = await prisma.cleanupSetting.findMany({
       where: {
-        OR: [{ freeStorageAfterDays: { not: null } }, { archiveFailedAfterDays: { not: null } }],
+        // Rodada 21: mandatory cleanup = every user (was only users with a rule)
+        ...(platform.maxFreeStorageDays ? {} : { OR: ruleFilters }),
         AND: [{ OR: [{ lastAutoRunAt: null }, { lastAutoRunAt: { lt: dueBefore } }] }],
       },
       take: 50,
     });
     for (const s of settings) {
       const rules = [];
-      if (s.freeStorageAfterDays) {
-        rules.push({ action: 'FREE_STORAGE', filter: { olderThanDays: s.freeStorageAfterDays } });
+      const freeDays = effectiveFreeDays(s, platform); // Rodada 21: default / mandatory
+      if (freeDays) {
+        rules.push({ action: 'FREE_STORAGE', filter: { olderThanDays: freeDays } });
       }
       if (s.archiveFailedAfterDays) {
         rules.push({ action: 'ARCHIVE_POSTS', filter: { status: 'FAILED', olderThanDays: s.archiveFailedAfterDays } });
@@ -509,14 +556,19 @@ function startRunner() {
   runnerTimer = setInterval(runnerTick, RUNNER_TICK_MS);
   autoTimer = setInterval(autoTick, AUTO_CHECK_MS);
   setTimeout(autoTick, 2 * 60 * 1000).unref?.();
+  // Rodada 21: every hour, delete uploads no post uses (not in the Biblioteca)
+  sweepTimer = setInterval(() => storageService.sweepOrphans(), AUTO_CHECK_MS);
+  setTimeout(() => storageService.sweepOrphans(), 5 * 60 * 1000).unref?.();
   logger.info('Cleanup runner started');
 }
 
 function stopRunner() {
   if (runnerTimer) clearInterval(runnerTimer);
   if (autoTimer) clearInterval(autoTimer);
+  if (sweepTimer) clearInterval(sweepTimer); // Rodada 21
   runnerTimer = null;
   autoTimer = null;
+  sweepTimer = null; // Rodada 21
 }
 
 function toPublicShape(job) {

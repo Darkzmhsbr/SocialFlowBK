@@ -83,6 +83,17 @@
 //   - MediaAsset.purgedAt: file removed from storage by "liberar
 //     armazenamento"; the row stays so published posts keep their history.
 //   Applied via POST|GET /api/setup/migrate-rodada12-cleanup.
+//
+// Rodada 21 additions (storage limits):
+//   - User.storageQuotaMb: individual quota in MB (null = platform default,
+//     -1 = unlimited).
+//   - PlatformSetting: one row ("default") with the platform rules set by
+//     the admin: default quota, default/mandatory automatic cleanup,
+//     abandoned-upload sweep, admins without limit.
+//   - CleanupSetting.freeStorageFromDefault: the user never chose a rule, so
+//     "liberar armazenamento" follows the platform default.
+//   - MediaAsset index (userId, purgedAt): instant usage totals.
+//   Applied via POST|GET /api/setup/migrate-rodada21-storage.
 
 generator client {
   provider = "prisma-client-js"
@@ -139,6 +150,9 @@ model User {
 
   // Rodada 18: per-post metrics snapshots
   postInsightSnapshots PostInsightSnapshot[]
+
+  // Rodada 21: storage quota in MB (null = platform default, -1 = unlimited)
+  storageQuotaMb Int?
 
   @@map("users")
 }
@@ -260,6 +274,8 @@ model MediaAsset {
   @@index([userId])
   @@index([folderId])
   @@index([userId, originalName])
+  // Rodada 21: storage usage per user
+  @@index([userId, purgedAt])
   @@map("media_assets")
 }
 
@@ -517,6 +533,8 @@ model CleanupSetting {
   user                   User      @relation(fields: [userId], references: [id], onDelete: Cascade)
   freeStorageAfterDays   Int?      // null = off
   archiveFailedAfterDays Int?      // null = off
+  // Rodada 21: true = the user never chose; follows the platform default
+  freeStorageFromDefault Boolean   @default(false)
   lastAutoRunAt          DateTime?
   createdAt              DateTime  @default(now())
   updatedAt              DateTime  @updatedAt
@@ -652,4 +670,27 @@ model PostInsightSnapshot {
   @@index([userId, publishedAt])
   @@index([instagramAccountId, checkpoint, publishedAt], map: "post_insight_snapshots_account_checkpoint_idx")
   @@map("post_insight_snapshots")
+}
+
+// Rodada 21: platform rules set by the admin (page "Usuários"). One row,
+// id = "default". Quotas in MB.
+//   defaultQuotaMb          : quota of users without an individual quota
+//   defaultFreeStorageDays  : automatic "liberar armazenamento" for users who
+//                             never chose a rule (null = off)
+//   maxFreeStorageDays      : mandatory cleanup — nobody can turn it off or go
+//                             above this number of days (null = not mandatory)
+//   orphanSweepHours        : uploads not used by any post and not in the
+//                             Biblioteca are deleted after these hours
+//   adminsUnlimited         : ADMIN_EMAILS have no quota (unless one is set)
+model PlatformSetting {
+  id                     String   @id @default("default")
+  defaultQuotaMb         Int      @default(5120)
+  defaultFreeStorageDays Int?     @default(7)
+  maxFreeStorageDays     Int?
+  orphanSweepHours       Int      @default(24)
+  adminsUnlimited        Boolean  @default(true)
+  createdAt              DateTime @default(now())
+  updatedAt              DateTime @updatedAt
+
+  @@map("platform_settings")
 }

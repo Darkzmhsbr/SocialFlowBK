@@ -1486,6 +1486,130 @@ async function migrateRodada19Import(req, res) {
 router.get('/migrate-rodada19-import', migrateRodada19Import);
 router.post('/migrate-rodada19-import', migrateRodada19Import);
 
+// GET  /api/setup/migrate-rodada21-storage?token=SEU_TOKEN   (pelo navegador)
+// POST /api/setup/migrate-rodada21-storage?token=SEU_TOKEN   (curl/Postman)
+//
+// Rodada 21 (armazenamento e limites) schema migration:
+//   - users."storageQuotaMb" INTEGER (nullable: null = padrão, -1 = ilimitado)
+//   - cleanup_settings."freeStorageFromDefault" BOOLEAN NOT NULL DEFAULT false
+//   - table platform_settings + the "default" row (5 GB, limpeza 7 dias,
+//     faxina 24 h, administradores sem limite)
+//   - index media_assets (userId, purgedAt)
+// Names match what Prisma generates for schema.prisma (no drift).
+// Run RIGHT AFTER the backend deploy goes Active. Idempotent,
+// transactional, existing data untouched.
+async function migrateRodada21Storage(req, res) {
+  if (!assertSetupToken(req, res)) return;
+
+  try {
+    const before = await inspectRodada21Schema();
+    if (before.quotaColumn && before.defaultColumn && before.settingsTable && before.settingsRow && before.index) {
+      return res.json({
+        success: true,
+        data: {
+          applied: { quotaColumn: false, defaultColumn: false, settingsTable: false, settingsRow: false, index: false },
+          schema: before,
+          message: 'Nada a migrar. Armazenamento e limites já existem.',
+        },
+      });
+    }
+
+    await prisma.$transaction([
+      prisma.$executeRawUnsafe('ALTER TABLE "users" ADD COLUMN IF NOT EXISTS "storageQuotaMb" INTEGER'),
+      prisma.$executeRawUnsafe(
+        'ALTER TABLE "cleanup_settings" ADD COLUMN IF NOT EXISTS "freeStorageFromDefault" BOOLEAN NOT NULL DEFAULT false'
+      ),
+      prisma.$executeRawUnsafe(
+        'CREATE TABLE IF NOT EXISTS "platform_settings" (' +
+          '"id" TEXT NOT NULL DEFAULT \'default\', ' +
+          '"defaultQuotaMb" INTEGER NOT NULL DEFAULT 5120, ' +
+          '"defaultFreeStorageDays" INTEGER DEFAULT 7, ' +
+          '"maxFreeStorageDays" INTEGER, ' +
+          '"orphanSweepHours" INTEGER NOT NULL DEFAULT 24, ' +
+          '"adminsUnlimited" BOOLEAN NOT NULL DEFAULT true, ' +
+          '"createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP, ' +
+          '"updatedAt" TIMESTAMP(3) NOT NULL, ' +
+          'CONSTRAINT "platform_settings_pkey" PRIMARY KEY ("id"))'
+      ),
+      prisma.$executeRawUnsafe(
+        'INSERT INTO "platform_settings" ("id", "updatedAt") VALUES (\'default\', CURRENT_TIMESTAMP) ON CONFLICT ("id") DO NOTHING'
+      ),
+      prisma.$executeRawUnsafe(
+        'CREATE INDEX IF NOT EXISTS "media_assets_userId_purgedAt_idx" ON "media_assets"("userId", "purgedAt")'
+      ),
+    ]);
+
+    const after = await inspectRodada21Schema();
+    const applied = {
+      quotaColumn: !before.quotaColumn && after.quotaColumn,
+      defaultColumn: !before.defaultColumn && after.defaultColumn,
+      settingsTable: !before.settingsTable && after.settingsTable,
+      settingsRow: !before.settingsRow && after.settingsRow,
+      index: !before.index && after.index,
+    };
+
+    logger.info('Rodada 21 storage migration applied', { applied, schema: after });
+
+    return res.json({
+      success: true,
+      data: {
+        applied,
+        schema: after,
+        message: 'Migração Rodada 21 concluída. Armazenamento e limites liberados - pode publicar o frontend.',
+      },
+    });
+  } catch (error) {
+    logger.error('Failed to apply Rodada 21 storage migration', {
+      message: error.message,
+      code: error.code,
+      meta: error.meta,
+    });
+    return res.status(500).json({
+      success: false,
+      error: {
+        code: error.code || 'PRISMA_ERROR',
+        message: error.message,
+        details: error.meta || null,
+      },
+    });
+  }
+}
+
+router.get('/migrate-rodada21-storage', migrateRodada21Storage);
+router.post('/migrate-rodada21-storage', migrateRodada21Storage);
+
+async function inspectRodada21Schema() {
+  const columns = await prisma.$queryRaw`
+    SELECT table_name::text AS table_name, column_name::text AS column_name FROM information_schema.columns
+    WHERE table_schema = current_schema() AND table_name IN ('users', 'cleanup_settings')
+  `;
+  const has = (t, c) => columns.some((r) => r.table_name === t && r.column_name === c);
+  const [table] = await prisma.$queryRaw`
+    SELECT EXISTS (
+      SELECT 1 FROM information_schema.tables
+      WHERE table_schema = current_schema() AND table_name = 'platform_settings'
+    ) AS "exists"
+  `;
+  let settingsRow = false;
+  if (table?.exists) {
+    const [row] = await prisma.$queryRaw`SELECT COUNT(*)::int AS "n" FROM "platform_settings" WHERE "id" = 'default'`;
+    settingsRow = Number(row?.n) > 0;
+  }
+  const [index] = await prisma.$queryRaw`
+    SELECT EXISTS (
+      SELECT 1 FROM pg_indexes
+      WHERE schemaname = current_schema() AND indexname = 'media_assets_userId_purgedAt_idx'
+    ) AS "exists"
+  `;
+  return {
+    quotaColumn: has('users', 'storageQuotaMb'),
+    defaultColumn: has('cleanup_settings', 'freeStorageFromDefault'),
+    settingsTable: Boolean(table?.exists),
+    settingsRow,
+    index: Boolean(index?.exists),
+  };
+}
+
 async function inspectRodada19Schema() {
   const [column] = await prisma.$queryRaw`
     SELECT EXISTS (

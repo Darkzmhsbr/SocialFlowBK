@@ -44,6 +44,9 @@ async function uploadFile({ userId, file, region, deviceBrand }) {
 
   const { type, resourceType } = classifyMime(file.mimetype);
   enforceSizeLimit(type, file.size);
+  // Rodada 21: storage quota — checked BEFORE sending to storage (a refused
+  // upload costs nothing). Lazy require: storageService also uses this file.
+  await require('../storage/storageService').assertCanUpload(userId, file.size); // eslint-disable-line global-require
 
   logger.info('Media upload starting', {
     userId,

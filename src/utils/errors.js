@@ -109,6 +109,9 @@ const ErrorCodes = {
 
   // Rodada 19B - spreadsheet import
   IMPORT_INVALID: 'IMPORT_INVALID',
+
+  // Rodada 21 - storage limits
+  STORAGE_QUOTA_EXCEEDED: 'STORAGE_QUOTA_EXCEEDED',
 };
 
 module.exports = { AppError, ErrorCodes };

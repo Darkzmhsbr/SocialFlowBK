@@ -25,6 +25,8 @@ const performanceRoutes = require('./performanceRoutes');
 // Rodada 19B
 const importRoutes = require('./importRoutes');
 const reportsRoutes = require('./reportsRoutes');
+// Rodada 21
+const storageRoutes = require('./storageRoutes');
 
 const router = Router();
 
@@ -46,5 +48,6 @@ router.use('/telegram', telegramRoutes); // -> /api/telegram/* (Rodada 17)
 router.use('/performance', performanceRoutes); // -> /api/performance/* (Rodada 18)
 router.use('/imports', importRoutes); // -> /api/imports/* (Rodada 19B)
 router.use('/reports', reportsRoutes); // -> /api/reports/* (Rodada 19B)
+router.use('/storage', storageRoutes); // -> /api/storage (Rodada 21)
 
 module.exports = router;
