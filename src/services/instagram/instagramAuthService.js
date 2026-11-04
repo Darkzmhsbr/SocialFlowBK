@@ -161,7 +161,7 @@ async function completeOAuthFlow(code, { metaAppCredentialId = null } = {}) { //
       tokenExpiresAt,
       accounts: igIds.map((igUserId) => ({
         igUserId,
-        accessToken: instagramApiClient.makeUnifiedToken(igUserId, exchanged.accessToken),
+        accessToken: instagramApiClient.makeUnifiedToken(igUserId, exchanged.accessToken, app.appSecret), // Rodada 22B: + appsecret_proof
       })),
     };
   }

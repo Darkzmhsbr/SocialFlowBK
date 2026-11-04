@@ -43,6 +43,8 @@
 // already belongs to the app that created it.
 
 const axios = require('axios');
+// Rodada 22B: appsecret_proof for system-user tokens (Unified login).
+const crypto = require('crypto');
 const env = require('../../config/env');
 const { AppError, ErrorCodes } = require('../../utils/errors');
 const logger = require('../../utils/logger');
@@ -68,9 +70,27 @@ const FB_DIALOG_URL = `https://www.facebook.com/${FB_GRAPH_VERSION}/dialog/oauth
 // the health check never tries to refresh them.
 const UNIFIED_TOKEN_EXPIRES_AT = new Date('2099-12-31T00:00:00Z');
 
+// Rodada 22B: "FBUP:<igId>:<proof>:<token>" also carries the appsecret_proof
+// (HMAC of the token with the app secret, computed once at connection; the
+// token never changes). Meta may require it for system-user tokens.
+const UNIFIED_PROOF_PREFIX = 'FBUP:';
+const proofByToken = new Map(); // real token -> appsecret_proof
+
+function appSecretProof(token, appSecret) {
+  return crypto.createHmac('sha256', String(appSecret)).update(String(token)).digest('hex');
+}
+
 /** "FBU:<igId>:<token>" -> { igUserId, token } (null for normal tokens). */
 function parseUnifiedToken(accessToken) {
   const raw = String(accessToken || '');
+  // Rodada 22B: composite with proof
+  if (raw.startsWith(UNIFIED_PROOF_PREFIX)) {
+    const parts = raw.slice(UNIFIED_PROOF_PREFIX.length).split(':');
+    if (parts.length < 3 || !parts[0]) return null;
+    const token = parts.slice(2).join(':');
+    proofByToken.set(token, parts[1]);
+    return { igUserId: parts[0], token, proof: parts[1] };
+  }
   if (!raw.startsWith(UNIFIED_PREFIX)) return null;
   const rest = raw.slice(UNIFIED_PREFIX.length);
   const sep = rest.indexOf(':');
@@ -78,8 +98,29 @@ function parseUnifiedToken(accessToken) {
   return { igUserId: rest.slice(0, sep), token: rest.slice(sep + 1) };
 }
 
-function makeUnifiedToken(igUserId, token) {
+function makeUnifiedToken(igUserId, token, appSecret = null) { // Rodada 22B: + appSecret (proof)
+  if (appSecret) return `${UNIFIED_PROOF_PREFIX}${igUserId}:${appSecretProof(token, appSecret)}:${token}`; // Rodada 22B
   return `${UNIFIED_PREFIX}${igUserId}:${token}`;
+}
+
+// Rodada 22B: every graph.facebook.com call made with a known system-user
+// token also sends its appsecret_proof (harmless when Meta doesn't need it).
+if (axios.interceptors?.request?.use) {
+  axios.interceptors.request.use((config) => {
+    const token = config?.params?.access_token;
+    if (token && !config.params.appsecret_proof && String(config.url || '').startsWith('https://graph.facebook.com/')) {
+      const proof = proofByToken.get(token);
+      if (proof) config.params = { ...config.params, appsecret_proof: proof };
+    }
+    return config;
+  });
+}
+
+/** Rodada 22B: Meta error as one short readable text for the logs. */
+function metaErrorText(error) {
+  const e = error?.response?.data?.error;
+  if (!e) return error?.message || 'erro desconhecido';
+  return `código ${e.code ?? '?'}${e.error_subcode ? `/${e.error_subcode}` : ''}: ${e.error_user_msg || e.message || ''}`.slice(0, 300);
 }
 
 function isUnifiedToken(accessToken) {
@@ -152,6 +193,11 @@ async function listUnifiedInstagramAccounts(token, app) {
     for (const g of scopes) {
       if (/^instagram_/.test(g.scope) && Array.isArray(g.target_ids)) g.target_ids.forEach((id) => ids.add(String(id)));
     }
+    // Rodada 22B: details in the line itself (Railway shows the message first)
+    logger.info(
+      `Unified login granted scopes — type=${data?.data?.type || '?'} scopes=${(data?.data?.scopes || []).join(',')} ` +
+        `instagramIds=[${[...ids].join(',')}] granular=${JSON.stringify(data?.data?.granular_scopes || []).slice(0, 400)}`
+    );
     logger.info('Unified login granted scopes', {
       type: data?.data?.type,
       scopes: (data?.data?.scopes || []).join(','),
@@ -173,6 +219,73 @@ async function listUnifiedInstagramAccounts(token, app) {
       toAppError(error, 'Unified login: /me/accounts failed');
     }
   }
+  // Rodada 22B: system-user tokens don't list the Instagram account in the
+  // granular scopes. Try the other places Meta exposes the granted assets,
+  // logging each answer in the line itself (for diagnosis).
+  if (ids.size === 0) {
+    const found = await discoverUnifiedAccounts(token, app);
+    found.forEach((id) => ids.add(id));
+  }
+  return [...ids];
+}
+
+// Rodada 22B: other ways to find the Instagram accounts of a system-user
+// token. Each probe is independent; failures are only logged.
+async function discoverUnifiedAccounts(token, app) {
+  const ids = new Set();
+  const proof = app?.appSecret ? appSecretProof(token, app.appSecret) : undefined;
+  const fb = async (path, fields, label, pick) => {
+    try {
+      const { data } = await axios.get(`${FB_GRAPH_BASE}${path}`, {
+        params: { ...(fields ? { fields } : {}), limit: 100, access_token: token, appsecret_proof: proof },
+        timeout: 15000,
+      });
+      const got = pick(data).filter(Boolean).map(String);
+      got.forEach((id) => ids.add(id));
+      logger.info(`Unified login probe ${label}: ok — ids=[${got.join(',')}] resposta=${JSON.stringify(data).slice(0, 300)}`);
+      return data;
+    } catch (error) {
+      logger.warn(`Unified login probe ${label}: falhou — ${metaErrorText(error)}`);
+      return null;
+    }
+  };
+
+  const me = await fb('/me', 'id,name,client_business_id', '/me', () => []);
+  const businessId = me?.client_business_id;
+  if (businessId) {
+    await fb(`/${businessId}/owned_instagram_accounts`, 'id,username', 'owned_instagram_accounts', (d) =>
+      (d?.data || []).map((x) => x.id)
+    );
+    await fb(`/${businessId}/instagram_accounts`, 'id,username', 'business instagram_accounts', (d) =>
+      (d?.data || []).map((x) => x.id)
+    );
+    await fb(`/${businessId}/instagram_business_accounts`, 'id,username', 'instagram_business_accounts', (d) =>
+      (d?.data || []).map((x) => x.id)
+    );
+  }
+  await fb('/me/assigned_pages', 'instagram_business_account{id}', 'assigned_pages', (d) =>
+    (d?.data || []).map((p) => p.instagram_business_account?.id)
+  );
+  await fb('/me/instagram_accounts', 'id,username', 'me/instagram_accounts', (d) => (d?.data || []).map((x) => x.id));
+
+  // "Compatível com o Login do Instagram": the same token may also work on
+  // graph.instagram.com, which answers /me with the professional account id.
+  try {
+    const { data } = await axios.get(`${igConfig.apiBaseUrl}/me`, {
+      params: { fields: 'user_id,username', access_token: token },
+      timeout: 15000,
+    });
+    if (data?.user_id) ids.add(String(data.user_id));
+    logger.info(`Unified login probe graph.instagram.com/me: ok — ${JSON.stringify(data).slice(0, 200)}`);
+  } catch (error) {
+    logger.warn(`Unified login probe graph.instagram.com/me: falhou — ${metaErrorText(error)}`);
+  }
+
+  // Check each account found on graph.facebook.com (what publishing uses).
+  for (const id of ids) {
+    await fb(`/${id}`, 'id,username', `conta ${id}`, () => []);
+  }
+  logger.info(`Unified login probes: ${ids.size} conta(s) encontrada(s) — [${[...ids].join(',')}] businessId=${businessId || '-'}`);
   return [...ids];
 }
 
