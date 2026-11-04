@@ -65,9 +65,36 @@ const handleCallback = async (req, res) => {
 
     logger.info('Instagram OAuth callback received', { requestId: req.requestId });
 
-    const { accessToken, tokenExpiresAt } = await authService.completeOAuthFlow(code, {
+    const oauthResult = await authService.completeOAuthFlow(code, { // Rodada 22: keeps the whole result
       metaAppCredentialId: stateInfo.metaAppCredentialId,
     }); // Rodada 10: was completeOAuthFlow(code)
+    const { accessToken, tokenExpiresAt } = oauthResult; // Rodada 22: was destructured directly above
+
+    // Rodada 22: Unified login — every Instagram account ticked in the
+    // Facebook dialog is connected at once (same token, one row each).
+    if (oauthResult.unified) {
+      const saved = [];
+      const problems = [];
+      for (const item of oauthResult.accounts) {
+        try {
+          saved.push(
+            await accountService.connectAndStoreAccount({
+              userId,
+              accessToken: item.accessToken,
+              tokenExpiresAt: oauthResult.tokenExpiresAt,
+              metaAppCredentialId: stateInfo.metaAppCredentialId,
+            })
+          );
+        } catch (err) {
+          problems.push(err);
+          logger.warn('Unified login: Instagram account not connected', { igUserId: item.igUserId, error: err.message });
+        }
+      }
+      if (saved.length === 0) throw problems[0] || new AppError(ErrorCodes.INSTAGRAM_AUTH_FAILED, 'Nenhum perfil conectado.', 400);
+      if (stateInfo.metaAppCredentialId) await metaAppService.markVerified(stateInfo.metaAppCredentialId);
+      const label = saved.length === 1 ? saved[0].username : `${saved[0].username} +${saved.length - 1}`;
+      return res.redirect(callbackRedirect(stateInfo.external, 'connected', label));
+    }
     const connected = await accountService.connectAndStoreAccount({ // Rodada 20: keeps the result (username)
       userId,
       accessToken,

@@ -1578,6 +1578,84 @@ async function migrateRodada21Storage(req, res) {
 router.get('/migrate-rodada21-storage', migrateRodada21Storage);
 router.post('/migrate-rodada21-storage', migrateRodada21Storage);
 
+// GET  /api/setup/migrate-rodada22-unified?token=SEU_TOKEN   (pelo navegador)
+// POST /api/setup/migrate-rodada22-unified?token=SEU_TOKEN   (curl/Postman)
+//
+// Rodada 22 (login unificado) schema migration:
+//   - meta_app_credentials."loginType" TEXT NOT NULL DEFAULT 'INSTAGRAM'
+//   - meta_app_credentials."configId" TEXT (nullable)
+// Existing apps stay INSTAGRAM (exactly how they work today).
+// Names match what Prisma generates for schema.prisma (no drift).
+// Run RIGHT AFTER the backend deploy goes Active. Idempotent,
+// transactional, existing data untouched.
+async function migrateRodada22Unified(req, res) {
+  if (!assertSetupToken(req, res)) return;
+
+  try {
+    const before = await inspectRodada22Schema();
+    if (before.loginTypeColumn && before.configIdColumn) {
+      return res.json({
+        success: true,
+        data: {
+          applied: { loginTypeColumn: false, configIdColumn: false },
+          schema: before,
+          message: 'Nada a migrar. O login unificado já existe.',
+        },
+      });
+    }
+
+    await prisma.$transaction([
+      prisma.$executeRawUnsafe(
+        'ALTER TABLE "meta_app_credentials" ADD COLUMN IF NOT EXISTS "loginType" TEXT NOT NULL DEFAULT \'INSTAGRAM\''
+      ),
+      prisma.$executeRawUnsafe('ALTER TABLE "meta_app_credentials" ADD COLUMN IF NOT EXISTS "configId" TEXT'),
+    ]);
+
+    const after = await inspectRodada22Schema();
+    const applied = {
+      loginTypeColumn: !before.loginTypeColumn && after.loginTypeColumn,
+      configIdColumn: !before.configIdColumn && after.configIdColumn,
+    };
+
+    logger.info('Rodada 22 unified login migration applied', { applied, schema: after });
+
+    return res.json({
+      success: true,
+      data: {
+        applied,
+        schema: after,
+        message: 'Migração Rodada 22 concluída. Login unificado liberado - pode publicar o frontend.',
+      },
+    });
+  } catch (error) {
+    logger.error('Failed to apply Rodada 22 unified login migration', {
+      message: error.message,
+      code: error.code,
+      meta: error.meta,
+    });
+    return res.status(500).json({
+      success: false,
+      error: {
+        code: error.code || 'PRISMA_ERROR',
+        message: error.message,
+        details: error.meta || null,
+      },
+    });
+  }
+}
+
+router.get('/migrate-rodada22-unified', migrateRodada22Unified);
+router.post('/migrate-rodada22-unified', migrateRodada22Unified);
+
+async function inspectRodada22Schema() {
+  const columns = await prisma.$queryRaw`
+    SELECT column_name::text AS column_name FROM information_schema.columns
+    WHERE table_schema = current_schema() AND table_name = 'meta_app_credentials'
+  `;
+  const present = new Set(columns.map((c) => c.column_name));
+  return { loginTypeColumn: present.has('loginType'), configIdColumn: present.has('configId') };
+}
+
 async function inspectRodada21Schema() {
   const columns = await prisma.$queryRaw`
     SELECT table_name::text AS table_name, column_name::text AS column_name FROM information_schema.columns

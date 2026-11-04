@@ -65,7 +65,11 @@ async function startOAuthFlow(userId, { external = false } = {}) {
   // abandons the flow. Cheap - runs on every start.
   purgeExpiredStates();
 
-  const url = instagramApiClient.buildAuthorizationUrl(state, ownApp); // Rodada 10: was (state)
+  // Rodada 22: apps with Unified login use the Facebook dialog + config_id.
+  const url =
+    ownApp?.loginType === 'UNIFIED'
+      ? instagramApiClient.buildUnifiedAuthorizationUrl(state, ownApp)
+      : instagramApiClient.buildAuthorizationUrl(state, ownApp); // Rodada 10: was (state)
   logger.info('Instagram OAuth started', { userId, state, ownApp: Boolean(ownApp), external: Boolean(external) });
   return { url, state, expiresAt: new Date(expiresAt) }; // Rodada 20: + expiresAt
 }
@@ -136,6 +140,32 @@ async function completeOAuthFlow(code, { metaAppCredentialId = null } = {}) { //
       400
     );
   }
+  // Rodada 22: Unified login app -> one system-user token that may cover
+  // several Instagram accounts (the ones ticked in the Facebook dialog).
+  if (app?.loginType === 'UNIFIED') {
+    const exchanged = await instagramApiClient.exchangeUnifiedCode(code, app);
+    const igIds = await instagramApiClient.listUnifiedInstagramAccounts(exchanged.accessToken, app);
+    if (igIds.length === 0) {
+      throw new AppError(
+        ErrorCodes.INSUFFICIENT_PERMISSIONS,
+        'Nenhuma conta do Instagram foi liberada. Na tela do Facebook, marque as contas do Instagram do seu portfólio e tente de novo.',
+        400
+      );
+    }
+    const tokenExpiresAt = exchanged.expiresInSeconds
+      ? new Date(Date.now() + exchanged.expiresInSeconds * 1000)
+      : instagramApiClient.UNIFIED_TOKEN_EXPIRES_AT;
+    logger.info('Unified login: Instagram accounts granted', { count: igIds.length, igIds });
+    return {
+      unified: true,
+      tokenExpiresAt,
+      accounts: igIds.map((igUserId) => ({
+        igUserId,
+        accessToken: instagramApiClient.makeUnifiedToken(igUserId, exchanged.accessToken),
+      })),
+    };
+  }
+
   const shortLived = await instagramApiClient.exchangeCodeForShortLivedToken(code, app); // Rodada 10: + app
   const longLived = await instagramApiClient.exchangeForLongLivedToken(shortLived.accessToken, app); // Rodada 10: + app
   const profile = await instagramApiClient.fetchAuthorizedProfile(longLived.accessToken);

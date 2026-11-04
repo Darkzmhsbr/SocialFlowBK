@@ -27,6 +27,15 @@
 // is byte-for-byte correct. Use FormData and let axios set the Content-Type
 // with the proper multipart boundary.
 //
+// Rodada 22: apps created from Oct/2026 on only offer "API setup with
+// Unified login" (Facebook Login for Business + config_id). Those profiles
+// use graph.facebook.com and a system-user token (never expires). Their
+// stored token is a composite "FBU:<ig-account-id>:<token>" — every
+// data-plane call below goes through apiBaseFor()/tokenOf(), which pick the
+// right host and the real token, so publish / insights / metrics / health
+// services did not need any change. Plain tokens keep using
+// graph.instagram.com exactly as before.
+//
 // Rodada 10: the 3 OAuth calls below accept an optional `app`
 // ({ appId, appSecret }) — the user's own Instagram app. Without it, the
 // server's default app (META_APP_ID / META_APP_SECRET) is used, exactly as
@@ -47,6 +56,124 @@ function apiBase() {
   return igConfig.apiVersion
     ? `${igConfig.apiBaseUrl}/${igConfig.apiVersion}`
     : igConfig.apiBaseUrl;
+}
+
+// --- Rodada 22: Unified login (Facebook Login for Business) ---------------
+
+const UNIFIED_PREFIX = 'FBU:';
+const FB_GRAPH_VERSION = process.env.META_GRAPH_VERSION || 'v26.0';
+const FB_GRAPH_BASE = `https://graph.facebook.com/${FB_GRAPH_VERSION}`;
+const FB_DIALOG_URL = `https://www.facebook.com/${FB_GRAPH_VERSION}/dialog/oauth`;
+// Far-future expiry stored for system-user tokens (they never expire), so
+// the health check never tries to refresh them.
+const UNIFIED_TOKEN_EXPIRES_AT = new Date('2099-12-31T00:00:00Z');
+
+/** "FBU:<igId>:<token>" -> { igUserId, token } (null for normal tokens). */
+function parseUnifiedToken(accessToken) {
+  const raw = String(accessToken || '');
+  if (!raw.startsWith(UNIFIED_PREFIX)) return null;
+  const rest = raw.slice(UNIFIED_PREFIX.length);
+  const sep = rest.indexOf(':');
+  if (sep <= 0) return null;
+  return { igUserId: rest.slice(0, sep), token: rest.slice(sep + 1) };
+}
+
+function makeUnifiedToken(igUserId, token) {
+  return `${UNIFIED_PREFIX}${igUserId}:${token}`;
+}
+
+function isUnifiedToken(accessToken) {
+  return Boolean(parseUnifiedToken(accessToken));
+}
+
+/** Versioned API base for the token: graph.facebook.com for Unified login. */
+function apiBaseFor(accessToken) {
+  return isUnifiedToken(accessToken) ? FB_GRAPH_BASE : apiBase();
+}
+
+/** The real token sent to Meta (without the FBU:<id>: prefix). */
+function tokenOf(accessToken) {
+  const unified = parseUnifiedToken(accessToken);
+  return unified ? unified.token : accessToken;
+}
+
+/** Login URL for a Unified login app (app = { appId, configId }). */
+function buildUnifiedAuthorizationUrl(state, app) {
+  const params = new URLSearchParams({
+    client_id: app.appId,
+    config_id: app.configId,
+    redirect_uri: metaConfig.redirectUri,
+    response_type: 'code',
+    override_default_response_type: 'true',
+    state,
+  });
+  logger.info('Unified login authorize URL built', { appId: app.appId, configId: app.configId });
+  return `${FB_DIALOG_URL}?${params.toString()}`;
+}
+
+/** code -> token (system-user token for Instagram configurations). */
+async function exchangeUnifiedCode(code, app) {
+  try {
+    const { data } = await axios.get(`${FB_GRAPH_BASE}/oauth/access_token`, {
+      params: {
+        client_id: app.appId,
+        client_secret: app.appSecret,
+        redirect_uri: metaConfig.redirectUri,
+        code,
+      },
+      timeout: 15000,
+    });
+    if (!data?.access_token) {
+      throw new AppError(ErrorCodes.INSTAGRAM_AUTH_FAILED, 'A Meta não devolveu o token de acesso.', 502, { response: data });
+    }
+    return {
+      accessToken: data.access_token,
+      expiresInSeconds: typeof data.expires_in === 'number' && data.expires_in > 0 ? data.expires_in : null,
+    };
+  } catch (error) {
+    if (error instanceof AppError) throw error;
+    throw toAppError(error, 'Failed to exchange Unified login code for token');
+  }
+}
+
+/**
+ * Instagram accounts the user granted in the Facebook dialog. First from the
+ * token's granular scopes (debug_token, app token = appId|appSecret), then
+ * from the Pages the token can see. Returns unique Instagram account ids.
+ */
+async function listUnifiedInstagramAccounts(token, app) {
+  const ids = new Set();
+  try {
+    const { data } = await axios.get(`${FB_GRAPH_BASE}/debug_token`, {
+      params: { input_token: token, access_token: `${app.appId}|${app.appSecret}` },
+      timeout: 15000,
+    });
+    const scopes = data?.data?.granular_scopes || [];
+    for (const g of scopes) {
+      if (/^instagram_/.test(g.scope) && Array.isArray(g.target_ids)) g.target_ids.forEach((id) => ids.add(String(id)));
+    }
+    logger.info('Unified login granted scopes', {
+      type: data?.data?.type,
+      scopes: (data?.data?.scopes || []).join(','),
+      instagramIds: [...ids],
+    });
+  } catch (error) {
+    toAppError(error, 'Unified login: debug_token failed (trying Pages)');
+  }
+  if (ids.size === 0) {
+    try {
+      const { data } = await axios.get(`${FB_GRAPH_BASE}/me/accounts`, {
+        params: { fields: 'instagram_business_account{id}', limit: 100, access_token: token },
+        timeout: 15000,
+      });
+      for (const page of data?.data || []) {
+        if (page.instagram_business_account?.id) ids.add(String(page.instagram_business_account.id));
+      }
+    } catch (error) {
+      toAppError(error, 'Unified login: /me/accounts failed');
+    }
+  }
+  return [...ids];
 }
 
 function buildAuthorizationUrl(state, app = null) { // Rodada 10: was (state)
@@ -130,6 +257,8 @@ async function exchangeForLongLivedToken(shortLivedToken, app = null) { // Rodad
 }
 
 async function refreshLongLivedToken(currentToken) {
+  // Rodada 22: system-user tokens (Unified login) never expire — nothing to refresh.
+  if (isUnifiedToken(currentToken)) return { accessToken: currentToken, expiresInSeconds: null };
   try {
     const { data } = await axios.get(`${igConfig.apiBaseUrl}/refresh_access_token`, {
       params: {
@@ -149,11 +278,24 @@ async function refreshLongLivedToken(currentToken) {
 }
 
 async function fetchAuthorizedProfile(accessToken) {
+  // Rodada 22: Unified login token -> the Instagram account it belongs to.
+  const unified = parseUnifiedToken(accessToken);
+  if (unified) {
+    try {
+      const { data } = await axios.get(`${FB_GRAPH_BASE}/${unified.igUserId}`, {
+        params: { fields: 'id,username,name,profile_picture_url', access_token: unified.token },
+        timeout: 10000,
+      });
+      return data;
+    } catch (error) {
+      throw toAppError(error, 'Failed to fetch Instagram profile (Unified login)');
+    }
+  }
   try {
     const { data } = await axios.get(`${igConfig.apiBaseUrl}/me`, {
       params: {
         fields: 'id,username,name,account_type,profile_picture_url',
-        access_token: accessToken,
+        access_token: tokenOf(accessToken), // Rodada 22: was access_token: accessToken
       },
       timeout: 10000,
     });
@@ -180,10 +322,10 @@ async function fetchAuthorizedProfile(accessToken) {
 async function createMediaContainer(igUserId, params, accessToken) {
   try {
     const { data } = await axios.post(
-      `${apiBase()}/${igUserId}/media`,
+      `${apiBaseFor(accessToken)}/${igUserId}/media`,
       null,
       {
-        params: { ...params, access_token: accessToken },
+        params: { ...params, access_token: tokenOf(accessToken) }, // Rodada 22: was access_token: accessToken
         timeout: 30000,
       }
     );
@@ -218,10 +360,10 @@ async function createMediaContainer(igUserId, params, accessToken) {
  */
 async function getMediaContainerStatus(creationId, accessToken) {
   try {
-    const { data } = await axios.get(`${apiBase()}/${creationId}`, {
+    const { data } = await axios.get(`${apiBaseFor(accessToken)}/${creationId}`, {
       params: {
         fields: 'status_code,status',
-        access_token: accessToken,
+        access_token: tokenOf(accessToken), // Rodada 22: was access_token: accessToken
       },
       timeout: 15000,
     });
@@ -243,10 +385,10 @@ async function getMediaContainerStatus(creationId, accessToken) {
 async function publishMediaContainer(igUserId, creationId, accessToken) {
   try {
     const { data } = await axios.post(
-      `${apiBase()}/${igUserId}/media_publish`,
+      `${apiBaseFor(accessToken)}/${igUserId}/media_publish`,
       null,
       {
-        params: { creation_id: creationId, access_token: accessToken },
+        params: { creation_id: creationId, access_token: tokenOf(accessToken) }, // Rodada 22: was access_token: accessToken
         timeout: 30000,
       }
     );
@@ -289,10 +431,10 @@ async function publishMediaContainer(igUserId, creationId, accessToken) {
  */
 async function fetchMediaInsights(mediaId, accessToken, metrics) {
   try {
-    const { data } = await axios.get(`${apiBase()}/${mediaId}/insights`, {
+    const { data } = await axios.get(`${apiBaseFor(accessToken)}/${mediaId}/insights`, {
       params: {
         metric: metrics.join(','),
-        access_token: accessToken,
+        access_token: tokenOf(accessToken), // Rodada 22: was access_token: accessToken
       },
       timeout: 15000,
     });
@@ -357,8 +499,8 @@ function toAppError(error, contextMessage) {
  */
 async function fetchRecentMedia(igUserId, accessToken, limit = 5) {
   try {
-    const { data } = await axios.get(`${apiBase()}/${igUserId}/media`, {
-      params: { fields: 'id,timestamp', limit, access_token: accessToken },
+    const { data } = await axios.get(`${apiBaseFor(accessToken)}/${igUserId}/media`, {
+      params: { fields: 'id,timestamp', limit, access_token: tokenOf(accessToken) }, // Rodada 22: was access_token: accessToken
       timeout: 15000,
     });
     return (data?.data || []).map((m) => ({ id: String(m.id), timestamp: m.timestamp || null }));
@@ -377,10 +519,10 @@ async function fetchRecentMedia(igUserId, accessToken, limit = 5) {
  */
 async function fetchMediaInfo(mediaId, accessToken) {
   try {
-    const { data } = await axios.get(`${apiBase()}/${mediaId}`, {
+    const { data } = await axios.get(`${apiBaseFor(accessToken)}/${mediaId}`, {
       params: {
         fields: 'permalink,thumbnail_url,media_url,media_type',
-        access_token: accessToken,
+        access_token: tokenOf(accessToken), // Rodada 22: was access_token: accessToken
       },
       timeout: 15000,
     });
@@ -403,10 +545,10 @@ async function fetchMediaInfo(mediaId, accessToken) {
  */
 async function fetchAccountStats(igUserId, accessToken) {
   try {
-    const { data } = await axios.get(`${apiBase()}/${igUserId}`, {
+    const { data } = await axios.get(`${apiBaseFor(accessToken)}/${igUserId}`, {
       params: {
         fields: 'followers_count,follows_count,media_count',
-        access_token: accessToken,
+        access_token: tokenOf(accessToken), // Rodada 22: was access_token: accessToken
       },
       timeout: 15000,
     });
@@ -433,14 +575,14 @@ async function fetchAccountStats(igUserId, accessToken) {
  */
 async function fetchAccountInsights(igUserId, accessToken, { metrics, since, until }) {
   try {
-    const { data } = await axios.get(`${apiBase()}/${igUserId}/insights`, {
+    const { data } = await axios.get(`${apiBaseFor(accessToken)}/${igUserId}/insights`, {
       params: {
         metric: metrics.join(','),
         period: 'day',
         metric_type: 'total_value',
         since,
         until,
-        access_token: accessToken,
+        access_token: tokenOf(accessToken), // Rodada 22: was access_token: accessToken
       },
       timeout: 15000,
     });
@@ -471,10 +613,10 @@ async function fetchAccountInsights(igUserId, accessToken, { metrics, since, unt
  */
 async function fetchContentPublishingLimit(igUserId, accessToken) {
   try {
-    const { data } = await axios.get(`${apiBase()}/${igUserId}/content_publishing_limit`, {
+    const { data } = await axios.get(`${apiBaseFor(accessToken)}/${igUserId}/content_publishing_limit`, {
       params: {
         fields: 'quota_usage,config',
-        access_token: accessToken,
+        access_token: tokenOf(accessToken), // Rodada 22: was access_token: accessToken
       },
       timeout: 15000,
     });
@@ -510,4 +652,11 @@ module.exports = {
   fetchMediaInfo,
   // Rodada 19A
   fetchRecentMedia,
+  // Rodada 22: Unified login
+  buildUnifiedAuthorizationUrl,
+  exchangeUnifiedCode,
+  listUnifiedInstagramAccounts,
+  makeUnifiedToken,
+  isUnifiedToken,
+  UNIFIED_TOKEN_EXPIRES_AT,
 };

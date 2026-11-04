@@ -94,6 +94,12 @@
 //     "liberar armazenamento" follows the platform default.
 //   - MediaAsset index (userId, purgedAt): instant usage totals.
 //   Applied via POST|GET /api/setup/migrate-rodada21-storage.
+//
+// Rodada 22 additions (Unified login):
+//   - MetaAppCredential.loginType: INSTAGRAM (Instagram login, older apps) or
+//     UNIFIED (Facebook Login for Business + config_id, apps from Oct/2026).
+//   - MetaAppCredential.configId: the configuration ID used by UNIFIED apps.
+//   Applied via POST|GET /api/setup/migrate-rodada22-unified.
 
 generator client {
   provider = "prisma-client-js"
@@ -486,6 +492,9 @@ model MetaAppCredential {
   user               User               @relation(fields: [userId], references: [id], onDelete: Cascade)
   appId              String             // Instagram App ID (NOT the Meta app container ID)
   appSecretEncrypted String             // Instagram App Secret, encrypted (utils/crypto)
+  // Rodada 22: INSTAGRAM (Instagram login) | UNIFIED (Unified login + config_id)
+  loginType          String             @default("INSTAGRAM")
+  configId           String?
   status             String             @default("PENDING") // PENDING | VERIFIED | ERROR
   verifiedAt         DateTime?
   lastErrorMessage   String?            @db.Text

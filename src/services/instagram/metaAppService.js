@@ -18,25 +18,51 @@ const logger = require('../../utils/logger');
 // Instagram App ID: digits. Instagram App Secret: 32 hex characters.
 const APP_ID_RE = /^\d{6,25}$/;
 const APP_SECRET_RE = /^[a-f0-9]{32}$/i;
+// Rodada 22: login type of the user's app.
+//   INSTAGRAM - "API setup with Instagram login" (apps created before Oct/2026)
+//   UNIFIED   - "API setup with Unified login" (newer apps): Meta app ID +
+//               Meta app secret + configuration ID (config_id)
+const LOGIN_TYPES = ['INSTAGRAM', 'UNIFIED'];
+const CONFIG_ID_RE = /^\d{6,25}$/;
 
-function cleanAppId(value) {
+function cleanLoginType(value) {
+  return LOGIN_TYPES.includes(value) ? value : 'INSTAGRAM';
+}
+
+function cleanConfigId(value) {
+  const configId = String(value || '').replace(/\s+/g, '');
+  if (!CONFIG_ID_RE.test(configId)) {
+    throw new AppError(
+      ErrorCodes.META_APP_INVALID,
+      'ID da configuração inválido. Copie a "Identificação da configuração" (só números) em Casos de uso › API do Instagram › API setup with Unified login.',
+      400
+    );
+  }
+  return configId;
+}
+
+function cleanAppId(value, loginType = 'INSTAGRAM') { // Rodada 22: + loginType
   const appId = String(value || '').replace(/\s+/g, '');
   if (!APP_ID_RE.test(appId)) {
     throw new AppError(
       ErrorCodes.META_APP_INVALID,
-      'ID do app inválido. Use o "ID do app do Instagram" (só números), em Casos de uso › API do Instagram › Configuração da API com login do Instagram.',
+      loginType === 'UNIFIED' // Rodada 22
+        ? 'ID do app inválido. Use o "ID do aplicativo" (só números), em Configurações do app › Básico.'
+        : 'ID do app inválido. Use o "ID do app do Instagram" (só números), em Casos de uso › API do Instagram › Configuração da API com login do Instagram.',
       400
     );
   }
   return appId;
 }
 
-function cleanAppSecret(value) {
+function cleanAppSecret(value, loginType = 'INSTAGRAM') { // Rodada 22: + loginType
   const secret = String(value || '').replace(/\s+/g, '');
   if (!APP_SECRET_RE.test(secret)) {
     throw new AppError(
       ErrorCodes.META_APP_INVALID,
-      'Chave secreta inválida. Use a "Chave secreta do app do Instagram" (32 caracteres) — não a chave do app principal da Meta.',
+      loginType === 'UNIFIED' // Rodada 22
+        ? 'Chave secreta inválida. Use a "Chave secreta do aplicativo" (32 caracteres), em Configurações do app › Básico › Mostrar.'
+        : 'Chave secreta inválida. Use a "Chave secreta do app do Instagram" (32 caracteres) — não a chave do app principal da Meta.',
       400
     );
   }
@@ -61,6 +87,9 @@ function toPublic(credential) {
     lastErrorMessage: credential.lastErrorMessage,
     lastErrorAt: credential.lastErrorAt,
     updatedAt: credential.updatedAt,
+    // Rodada 22
+    loginType: credential.loginType || 'INSTAGRAM',
+    configId: credential.configId || null,
   };
 }
 
@@ -85,13 +114,15 @@ async function getStatus(userId) {
  * unchanged (keeps the stored secret). Any change resets the status to
  * PENDING until the next successful connection.
  */
-async function saveCredentials(userId, { appId, appSecret } = {}) {
-  const cleanId = cleanAppId(appId);
+async function saveCredentials(userId, { appId, appSecret, loginType, configId } = {}) { // Rodada 22: + loginType, configId
+  const type = cleanLoginType(loginType); // Rodada 22
+  const cleanId = cleanAppId(appId, type); // Rodada 22: was cleanAppId(appId)
+  const cleanConfig = type === 'UNIFIED' ? cleanConfigId(configId) : null; // Rodada 22
   const existing = await prisma.metaAppCredential.findUnique({ where: { userId } });
 
   let encrypted;
   if (appSecret) {
-    encrypted = encryptToken(cleanAppSecret(appSecret));
+    encrypted = encryptToken(cleanAppSecret(appSecret, type)); // Rodada 22: was cleanAppSecret(appSecret)
   } else if (existing && existing.appId === cleanId) {
     encrypted = existing.appSecretEncrypted;
   } else {
@@ -105,13 +136,15 @@ async function saveCredentials(userId, { appId, appSecret } = {}) {
     verifiedAt: null,
     lastErrorMessage: null,
     lastErrorAt: null,
+    loginType: type, // Rodada 22
+    configId: cleanConfig, // Rodada 22
   };
   const saved = await prisma.metaAppCredential.upsert({
     where: { userId },
     update: data,
     create: { userId, ...data },
   });
-  logger.info('Meta app credentials saved', { userId, appId: cleanId, replaced: Boolean(existing) });
+  logger.info('Meta app credentials saved', { userId, appId: cleanId, loginType: type, replaced: Boolean(existing) }); // Rodada 22: + loginType
   return toPublic(saved);
 }
 
@@ -136,6 +169,8 @@ async function getAppForUser(userId) {
     credentialId: credential.id,
     appId: credential.appId,
     appSecret: decryptToken(credential.appSecretEncrypted),
+    loginType: credential.loginType || 'INSTAGRAM', // Rodada 22
+    configId: credential.configId || null, // Rodada 22
   };
 }
 
@@ -146,6 +181,8 @@ async function getAppByCredentialId(credentialId) {
     credentialId: credential.id,
     appId: credential.appId,
     appSecret: decryptToken(credential.appSecretEncrypted),
+    loginType: credential.loginType || 'INSTAGRAM', // Rodada 22
+    configId: credential.configId || null, // Rodada 22
   };
 }
 
@@ -168,6 +205,10 @@ async function recordError(credentialId, error) {
       'A Meta recusou o código. Confira: (1) a URL de retorno está cadastrada exatamente igual no app; (2) o ID e a chave secreta são os do APP DO INSTAGRAM (não do app principal).';
   } else if (/client_secret|app secret|Invalid OAuth|client_id/i.test(raw)) {
     hint = 'ID ou chave secreta do app incorretos. Copie de novo do painel do app (seção Instagram).';
+  } else if (/config_id|configuration|Nenhuma conta do Instagram/i.test(raw)) { // Rodada 22
+    hint = /Nenhuma conta/i.test(raw)
+      ? raw
+      : 'A Meta recusou a configuração. Confira o ID da configuração (API setup with Unified login) e se a URL de retorno está registrada nela.';
   }
   await prisma.metaAppCredential.update({
     where: { id: credentialId },
