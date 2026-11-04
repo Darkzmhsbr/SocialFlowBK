@@ -27,6 +27,8 @@
 // is byte-for-byte correct. Use FormData and let axios set the Content-Type
 // with the proper multipart boundary.
 //
+// Rodada 22C: the granted Instagram accounts come from
+// GET graph.facebook.com/{v}/me/assigned_instagram_accounts (official).
 // Rodada 22: apps created from Oct/2026 on only offer "API setup with
 // Unified login" (Facebook Login for Business + config_id). Those profiles
 // use graph.facebook.com and a system-user token (never expires). Their
@@ -184,6 +186,29 @@ async function exchangeUnifiedCode(code, app) {
  */
 async function listUnifiedInstagramAccounts(token, app) {
   const ids = new Set();
+  // Rodada 22C: official way (Meta docs, "Instagram API with Unified Login ›
+  // Get started"): GET /me/assigned_instagram_accounts with the system-user
+  // token returns every Instagram account the client shared with the app.
+  try {
+    const { data } = await axios.get(`${FB_GRAPH_BASE}/me/assigned_instagram_accounts`, {
+      params: {
+        fields: 'id,username',
+        limit: 100,
+        access_token: token,
+        appsecret_proof: app?.appSecret ? appSecretProof(token, app.appSecret) : undefined,
+      },
+      timeout: 15000,
+    });
+    const found = (data?.data || []).map((a) => a?.id).filter(Boolean).map(String);
+    found.forEach((id) => ids.add(id));
+    logger.info(
+      `Unified login assigned_instagram_accounts: ${found.length} conta(s) — ` +
+        `${(data?.data || []).map((a) => `${a.id}=@${a.username || '?'}`).join(', ')}`
+    );
+    if (ids.size > 0) return [...ids];
+  } catch (error) {
+    logger.warn(`Unified login assigned_instagram_accounts: falhou — ${metaErrorText(error)}`);
+  }
   try {
     const { data } = await axios.get(`${FB_GRAPH_BASE}/debug_token`, {
       params: { input_token: token, access_token: `${app.appId}|${app.appSecret}` },
