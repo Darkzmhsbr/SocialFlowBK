@@ -127,7 +127,11 @@ async function preview(userId, { action, filter } = {}) {
     });
     const seen = new Map();
     for (const row of rows) {
-      const assets = [...row.medias.map((m) => m.mediaAsset), row.coverMediaAsset].filter(Boolean);
+      // In FREE_STORAGE, cover images are kept so thumbnails on Desempenho never break.
+      const assets =
+        action === 'FREE_STORAGE'
+          ? row.medias.map((m) => m.mediaAsset).filter(Boolean)
+          : [...row.medias.map((m) => m.mediaAsset), row.coverMediaAsset].filter(Boolean);
       for (const a of assets) {
         if (!a.inLibrary && !a.purgedAt && !seen.has(a.id)) seen.set(a.id, a.bytes || 0);
       }
@@ -404,24 +408,36 @@ async function applyChunk(job, posts) {
   }
 
   // FREE_STORAGE — published posts only (already guaranteed by the WHERE).
+  // Cover images (coverMediaAsset) are intentionally excluded so published posts
+  // always keep their cover thumbnails intact on the Desempenho / Agendamentos pages.
   for (const p of posts) {
     let freedHere = 0;
-    const assets = [...p.medias.map((m) => m.mediaAsset), p.coverMediaAsset].filter(Boolean);
+    const assets = p.medias.map((m) => m.mediaAsset).filter(Boolean);
     for (const a of assets) {
       if (a.purgedAt) continue;
       if (a.inLibrary) {
         addReason(out.reasons, 'guardado na Biblioteca');
         continue;
       }
-      // Never touch a file still needed by a post that hasn't been published.
-      const pendingUse = await prisma.scheduledPost.count({
-        where: {
-          status: { notIn: ['PUBLISHED', 'ARCHIVED'] },
-          OR: [{ medias: { some: { mediaAssetId: a.id } } }, { coverMediaAssetId: a.id }],
-        },
-      });
+      // Never touch a file still needed by a post that hasn't been published,
+      // or that is serving as a cover image for any post.
+      const [pendingUse, coverUse] = await Promise.all([
+        prisma.scheduledPost.count({
+          where: {
+            status: { notIn: ['PUBLISHED', 'ARCHIVED'] },
+            OR: [{ medias: { some: { mediaAssetId: a.id } } }, { coverMediaAssetId: a.id }],
+          },
+        }),
+        prisma.scheduledPost.count({
+          where: { coverMediaAssetId: a.id },
+        }),
+      ]);
       if (pendingUse > 0) {
         addReason(out.reasons, 'usado em post ainda não publicado');
+        continue;
+      }
+      if (coverUse > 0) {
+        addReason(out.reasons, 'usado como capa de post');
         continue;
       }
       try {

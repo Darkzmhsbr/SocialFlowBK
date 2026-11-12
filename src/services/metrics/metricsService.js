@@ -166,7 +166,21 @@ async function collectAccount(account, day) {
   }
 
   try {
-    const stats = await instagramApiClient.fetchAccountStats(account.instagramUserId, token);
+    const rawStats = await instagramApiClient.fetchAccountStats(account.instagramUserId, token);
+    const { profilePictureUrl, username, name, ...stats } = rawStats;
+
+    // Keep the profile picture URL (and username/name) fresh on the active account
+    // so expired Instagram CDN signatures are renewed automatically.
+    const profilePatch = {};
+    if (profilePictureUrl) profilePatch.profilePictureUrl = profilePictureUrl;
+    if (username) profilePatch.username = username;
+    if (name !== undefined && name !== null) profilePatch.name = name;
+    if (Object.keys(profilePatch).length > 0) {
+      await prisma.instagramAccount
+        .update({ where: { id: account.id }, data: profilePatch })
+        .catch((err) => logger.warn('Metrics: profile picture refresh failed (ignored)', { accountId: account.id, error: err.message }));
+    }
+
     await sleep(CALL_GAP_MS);
     const insights = await fetchDayInsights(account, token, day);
     await saveDay(account, day, { ...stats, ...insightColumns(insights) });

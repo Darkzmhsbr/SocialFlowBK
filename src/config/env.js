@@ -182,9 +182,9 @@ const env = {
   // these values from GET /api/posts/batch/limits, so changing the env
   // vars on Railway is enough — no frontend deploy needed.
   batch: {
-    maxItems: Number(process.env.BATCH_MAX_ITEMS) || 50,
+    maxItems: Number(process.env.BATCH_MAX_ITEMS) || 100,
     maxAccounts: Number(process.env.BATCH_MAX_ACCOUNTS) || 50,
-    maxPosts: Number(process.env.BATCH_MAX_POSTS) || 2500,
+    maxPosts: Number(process.env.BATCH_MAX_POSTS) || 5000,
     // Window (minutes) over which the accounts of ONE item are spread.
     defaultWindowMinutes: Number(process.env.BATCH_DEFAULT_WINDOW_MINUTES) || 30,
     // Gap (minutes) between consecutive items on the SAME account.

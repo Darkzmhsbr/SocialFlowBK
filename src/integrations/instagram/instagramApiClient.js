@@ -679,13 +679,13 @@ async function fetchMediaInfo(mediaId, accessToken) {
 
 /**
  * Current profile counters. Works with the basic scope.
- * @returns {Promise<{ followersCount: number|null, followsCount: number|null, mediaCount: number|null }>}
+ * @returns {Promise<{ followersCount: number|null, followsCount: number|null, mediaCount: number|null, profilePictureUrl: string|null, username: string|null, name: string|null }>}
  */
 async function fetchAccountStats(igUserId, accessToken) {
   try {
     const { data } = await axios.get(`${apiBaseFor(accessToken)}/${igUserId}`, {
       params: {
-        fields: 'followers_count,follows_count,media_count',
+        fields: 'followers_count,follows_count,media_count,profile_picture_url,username,name',
         access_token: tokenOf(accessToken), // Rodada 22: was access_token: accessToken
       },
       timeout: 15000,
@@ -695,6 +695,9 @@ async function fetchAccountStats(igUserId, accessToken) {
       followersCount: num(data?.followers_count),
       followsCount: num(data?.follows_count),
       mediaCount: num(data?.media_count),
+      profilePictureUrl: data?.profile_picture_url || null,
+      username: data?.username || null,
+      name: data?.name || null,
     };
   } catch (error) {
     if (error instanceof AppError) throw error;

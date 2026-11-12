@@ -277,13 +277,15 @@ async function collectPost(post, checkpoint) {
   await saveSnapshot(post, checkpoint, { ok: true, ...cols });
 
   // Same data feeds the "Métricas" modal cache (no extra call there).
+  // Also refreshes mediaThumbnailUrl at each checkpoint (24h, 3d, 7d, 30d)
+  // because Instagram CDN thumbnail URLs expire after a few days.
   const postUpdate = { insightsData: result.raw, insightsUpdatedAt: new Date() };
-  if (!post.permalink) {
+  if (post.type !== 'STORY') {
     await sleep(CALL_GAP_MS);
     try {
       const info = await instagramApiClient.fetchMediaInfo(post.instagramMediaId, token);
-      postUpdate.permalink = info.permalink;
-      postUpdate.mediaThumbnailUrl = info.thumbnailUrl;
+      if (info.permalink) postUpdate.permalink = info.permalink;
+      if (info.thumbnailUrl) postUpdate.mediaThumbnailUrl = info.thumbnailUrl;
     } catch (err) {
       if (classifyMetaError(err).kind === 'RATE_LIMIT') throw new RateLimited();
     }
@@ -532,8 +534,10 @@ async function getPosts(userId, opts = {}) {
         caption: p.caption ? p.caption.slice(0, 120) : null,
         publishedAt: p.publishedAt,
         permalink: p.permalink,
-        thumbnailUrl: p.mediaThumbnailUrl || ownThumb || null,
-        videoUrl: !p.mediaThumbnailUrl && !ownThumb && media && !media.purgedAt && media.type === 'VIDEO' ? media.url : null,
+        // Prioritize permanent Backblaze cover/image over Meta's expiring CDN thumbnailUrl
+        thumbnailUrl: ownThumb || p.mediaThumbnailUrl || null,
+        fallbackThumbnailUrl: ownThumb && p.mediaThumbnailUrl ? p.mediaThumbnailUrl : null,
+        videoUrl: media && !media.purgedAt && media.type === 'VIDEO' ? media.url : null,
       },
       account: p.instagramAccount,
       checkpoint: snap.checkpoint,
