@@ -1,5 +1,5 @@
 const { Router } = require('express');
-const logger = require('../utils/logger');
+const logger = '../utils/logger'; // Ajuste o caminho se necessário no seu projeto backend
 
 const router = Router();
 
@@ -11,40 +11,47 @@ router.post('/', async (req, res) => {
     const authHeader = req.headers.authorization;
     const expectedSecret = process.env.WEBHOOK_SECRET || 'segredo-padrao';
 
-    // Validação do token Bearer enviado pelo Cloudflare Worker
+    // Validação do token Bearer enviado pelo Cloudflare Worker / Gmail Forwarder
     if (!authHeader || authHeader !== `Bearer ${expectedSecret}`) {
-      logger.warn('Tentativa de acesso não autorizada ao webhook de e-mail');
+      console.warn('Tentativa de acesso não autorizada ao webhook de e-mail');
       return res.status(401).json({
         success: false,
         error: { code: 'UNAUTHORIZED', message: 'Token de autorização inválido.' },
       });
     }
 
-    const { from, to, headers, raw, text, subject } = req.body;
+    const { from, to, headers, raw, text, subject, html } = req.body;
 
-    logger.info('E-mail interceptado recebido com sucesso', { from, to, subject });
+    console.log('E-mail interceptado recebido com sucesso', { from, to, subject });
 
-    // Extrai o código de 6 dígitos do corpo ou assunto do e-mail
-    const emailContent = raw || text || '';
-    const codeMatch = emailContent.match(/\b\d{6}\b/) || subject?.match(/\b\d{6}\b/);
+    // Junta todas as fontes possíveis de texto do e-mail (raw, text, html, subject)
+    const emailContent = [raw, text, html, subject].filter(Boolean).join(' ');
 
-    if (codeMatch && to) {
-      const code = codeMatch[0];
-      verificationStore.set(to, {
+    // REGEX BLINDADA: Procura por sequências de 6 dígitos isoladas ou precedidas/sucedidas por tags ou espaços comuns do Instagram
+    const codeMatch = emailContent.match(/\b\d{6}\b/) || emailContent.match(/confirm[^\d]*(\d{6})/i);
+
+    // Destinatário alvo (pode vir no "to" ou dentro do corpo se for catch-all)
+    const destinatarioAlvo = to || emailContent.match(/[\w.-]+@[\w.-]+\.\w+/)?.[0];
+
+    if (codeMatch && (destinatarioAlvo || to)) {
+      const code = codeMatch[1] || codeMatch[0];
+      const chaveArmazenamento = to || destinatarioAlvo;
+      
+      verificationStore.set(chaveArmazenamento.toLowerCase().trim(), {
         code,
         receivedAt: new Date(),
       });
-      logger.info('Código de verificação extraído e armazenado com sucesso', { to, code });
+      console.log('🎉 Código de verificação extraído e armazenado com sucesso!', { to: chaveArmazenamento, code });
     } else {
-      logger.warn('Não foi possível extrair o código de 6 dígitos do e-mail', { to });
+      console.warn('⚠️ Não foi possível extrair o código de 6 dígitos do e-mail. Conteúdo recebido:', emailContent.substring(0, 200));
     }
 
     return res.status(200).json({
       success: true,
-      message: 'E-mail processado e código armazenado com sucesso!',
+      message: 'E-mail processado!',
     });
   } catch (err) {
-    logger.error('Erro ao processar webhook de e-mail:', err);
+    console.error('Erro ao processar webhook de e-mail:', err);
     return res.status(500).json({
       success: false,
       error: { code: 'INTERNAL_ERROR', message: 'Erro interno ao processar o e-mail.' },
@@ -52,7 +59,7 @@ router.post('/', async (req, res) => {
   }
 });
 
-// Endpoint GET para o bot Playwright buscar o código de verificação
+// Endpoint GET para o bot Playwright/Patchright buscar o código de verificação
 router.get('/get-latest-email', (req, res) => {
   try {
     const authHeader = req.headers.authorization;
@@ -73,7 +80,9 @@ router.get('/get-latest-email', (req, res) => {
       });
     }
 
-    const record = verificationStore.get(to);
+    const emailBusca = to.toLowerCase().trim();
+    const record = verificationStore.get(emailBusca);
+    
     if (!record) {
       return res.status(404).json({
         success: false,
@@ -87,7 +96,7 @@ router.get('/get-latest-email', (req, res) => {
       receivedAt: record.receivedAt,
     });
   } catch (err) {
-    logger.error('Erro ao buscar código de verificação:', err);
+    console.error('Erro ao buscar código de verificação:', err);
     return res.status(500).json({
       success: false,
       error: { code: 'INTERNAL_ERROR', message: 'Erro interno ao buscar o código.' },
