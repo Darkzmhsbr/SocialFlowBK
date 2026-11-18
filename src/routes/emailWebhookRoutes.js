@@ -1,5 +1,5 @@
 const { Router } = require('express');
-const logger = require('../utils/logger'); // Verifique se o caminho do logger está correto no seu projeto
+const logger = require('../utils/logger');
 
 const router = Router();
 
@@ -20,36 +20,27 @@ router.post('/', async (req, res) => {
       });
     }
 
-    const { from, to, headers, raw, text, subject, html } = req.body;
+    // Unifica qualquer tipo de corpo recebido (JSON, texto cru ou stringify geral) para garantir leitura integral
+    const bodyData = req.body;
+    const rawText = typeof bodyData === 'string' ? bodyData : JSON.stringify(bodyData);
 
-    logger.info('E-mail interceptado recebido com sucesso', { from, to, subject });
+    logger.info('E-mail interceptado recebido com sucesso. Analisando conteúdo...');
 
-    // Concatena todas as fontes de texto para varredura
-    const emailContent = [raw, text, html, subject].filter(Boolean).join(' ');
+    // REGEX BLINDADA GLOBAL: Varre todo o texto em busca de qualquer bloco isolado de 6 dígitos
+    let code = null;
+    const matches = rawText.match(/\b\d{6}\b/g);
 
-    // REGEX REFINADA: Procura por padrões comuns de códigos de verificação do Instagram ou 6 dígitos isolados
-    // Ex: "083162 é o seu código", "código: 083162", ou qualquer 6 dígitos que venha após termos como "Instagram", "código" ou "code"
-    let codeMatch = null;
-    
-    // Tenta achar 6 dígitos perto de palavras-chave do Instagram
-    const regexContexto = /(?:instagram|c[oó]digo|code|confirma[çc][ãa]o)[^\d]{0,30}(\d{6})/i.exec(emailContent);
-    if (regexContexto) {
-      codeMatch = [regexContexto[1]];
-    } else {
-      // Fallback: Procura por qualquer bloco de 6 dígitos que não faça parte de uma URL ou IP
-      const matches = emailContent.match(/\b\d{6}\b/g);
-      if (matches && matches.length > 0) {
-        // Pega o último ou primeiro bloco de 6 dígitos encontrado que não seja uma porta/IP
-        codeMatch = [matches[0]];
-      }
+    if (matches && matches.length > 0) {
+      // Pega o último código de 6 dígitos encontrado (geralmente o mais recente no corpo do e-mail)
+      code = matches[matches.length - 1];
     }
 
-    // Identifica o destinatário alvo (catch-all)
-    const destinatarioAlvo = to || emailContent.match(/[\w.-]+@[\w.-]+\.\w+/)?.[0];
+    // Identifica o destinatário alvo (catch-all ou alias customizado)
+    const emailMatches = rawText.match(/[\w.-]+@[\w.-]+\.\w+/g);
+    const destinatarioAlvo = emailMatches ? emailMatches.find(e => e.includes('criacaoacelerada') || e.includes('primeirodate')) : null;
 
-    if (codeMatch && (destinatarioAlvo || to)) {
-      const code = codeMatch[0];
-      const chaveArmazenamento = (to || destinatarioAlvo).toLowerCase().trim();
+    if (code && destinatarioAlvo) {
+      const chaveArmazenamento = destinatarioAlvo.toLowerCase().trim();
       
       verificationStore.set(chaveArmazenamento, {
         code,
@@ -57,7 +48,7 @@ router.post('/', async (req, res) => {
       });
       logger.info('Código de verificação extraído e armazenado com sucesso', { to: chaveArmazenamento, code });
     } else {
-      logger.warn('Não foi possível extrair o código de 6 dígitos do e-mail. Conteúdo parcial:', { content: emailContent.substring(0, 300) });
+      logger.warn('Não foi possível extrair o código de 6 dígitos do e-mail. Conteúdo parcial:', { content: rawText.substring(0, 300) });
     }
 
     return res.status(200).json({

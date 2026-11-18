@@ -8,6 +8,11 @@ const routes = require('./routes');
 const app = express();
 
 app.use(requestId);
+
+// Adicionado suporte a texto plano e url-encoded para receber payloads de webhooks de e-mail (Gmail/Cloudflare)
+app.use(express.text({ limit: '2mb', type: ['text/*', 'application/json'] }));
+app.use(express.urlencoded({ extended: true, limit: '2mb' }));
+
 // Rodada 4.1: was express.json() (100kb default). A batch of 50 items, each
 // with its own 2200-char caption, can pass 100kb — 1mb keeps a wide margin.
 app.use(express.json({ limit: '2mb' }));
