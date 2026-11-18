@@ -26,29 +26,81 @@ router.post('/', async (req, res) => {
 
     logger.info('E-mail interceptado recebido com sucesso. Analisando conteúdo...');
 
-    // REGEX BLINDADA GLOBAL: Varre todo o texto em busca de qualquer bloco isolado de 6 dígitos
-    let code = null;
-    const matches = rawText.match(/\b\d{6}\b/g);
+    // 1. TRATAMENTO ESPECIAL: E-mail de confirmação de encaminhamento do Google/Gmail
+    if (
+      rawText.includes('forwarding-noreply@google.com') ||
+      rawText.includes('mail-settings.google.com')
+    ) {
+      const linksGoogle = rawText.match(/https:\/\/mail-settings\.google\.com\/mail\/[^\s"\\<>]+/g);
+      const codigoGoogle = rawText.match(
+        /(?:c[oó]digo de confirma[cç][aã]o|confirmation code)[^\d]*(\d{6,10})/i
+      );
 
-    if (matches && matches.length > 0) {
-      // Pega o último código de 6 dígitos encontrado (geralmente o mais recente no corpo do e-mail)
-      code = matches[matches.length - 1];
+      logger.info('=== CONFIRMAÇÃO DE ENCAMINHAMENTO DO GMAIL DETECTADA ===', {
+        linkDeConfirmacao: linksGoogle ? linksGoogle[0] : 'Link não localizado diretamente',
+        codigoDeConfirmacao: codigoGoogle ? codigoGoogle[1] : 'Verifique o texto abaixo',
+        conteudoCompleto: rawText.substring(0, 3000),
+      });
+
+      return res.status(200).json({
+        success: true,
+        message: 'E-mail de confirmação do Google registrado nos logs!',
+      });
     }
 
-    // Identifica o destinatário alvo (catch-all ou alias customizado)
-    const emailMatches = rawText.match(/[\w.-]+@[\w.-]+\.\w+/g);
-    const destinatarioAlvo = emailMatches ? emailMatches.find(e => e.includes('criacaoacelerada') || e.includes('primeirodate')) : null;
+    // 2. EXTRAÇÃO DO CÓDIGO DE 6 DÍGITOS DO INSTAGRAM
+    let code = null;
+    const subjectText =
+      typeof bodyData === 'object' && bodyData?.subject ? String(bodyData.subject) : '';
 
-    if (code && destinatarioAlvo) {
-      const chaveArmazenamento = destinatarioAlvo.toLowerCase().trim();
-      
-      verificationStore.set(chaveArmazenamento, {
-        code,
-        receivedAt: new Date(),
-      });
-      logger.info('Código de verificação extraído e armazenado com sucesso', { to: chaveArmazenamento, code });
+    // Prioridade 1: Código no assunto do e-mail (ex: "123456 is your Instagram code")
+    const subjectMatch = subjectText.match(/\b(\d{6})\b/);
+    // Prioridade 2: Código próximo a palavras-chave do Instagram no corpo da mensagem
+    const contextMatch = rawText.match(
+      /(?:Instagram|c[oó]digo|code|confirm)[^\d]{0,40}\b(\d{6})\b/i
+    );
+
+    if (subjectMatch) {
+      code = subjectMatch[1];
+    } else if (contextMatch) {
+      code = contextMatch[1];
     } else {
-      logger.warn('Não foi possível extrair o código de 6 dígitos do e-mail. Conteúdo parcial:', { content: rawText.substring(0, 300) });
+      // Fallback: Procura blocos isolados de 6 dígitos no corpo
+      const matches = rawText.match(/\b\d{6}\b/g);
+      if (matches && matches.length > 0) {
+        code = matches[0];
+      }
+    }
+
+    // Identifica todos os e-mails presentes (suporta '+' para Gmail Alias e domínios próprios)
+    const emailMatches = rawText.match(/[\w.+-]+@[\w.-]+\.\w+/g) || [];
+
+    if (code) {
+      const now = new Date();
+
+      // Salva o código para todos os e-mails identificados no pacote (alias original + catch-all)
+      for (const emailEncontrado of emailMatches) {
+        const chave = emailEncontrado.toLowerCase().trim();
+        verificationStore.set(chave, {
+          code,
+          receivedAt: now,
+        });
+      }
+
+      // Salva também em uma chave curinga caso o cabeçalho de encaminhamento oculte o alias +
+      verificationStore.set('ultimo_codigo_geral', {
+        code,
+        receivedAt: now,
+      });
+
+      logger.info('Código de verificação extraído e armazenado com sucesso', {
+        code,
+        destinatariosVinculados: emailMatches,
+      });
+    } else {
+      logger.warn('Não foi possível extrair o código de 6 dígitos do e-mail. Conteúdo parcial:', {
+        content: rawText.substring(0, 1500),
+      });
     }
 
     return res.status(200).json({
@@ -86,8 +138,16 @@ router.get('/get-latest-email', (req, res) => {
     }
 
     const emailBusca = to.toLowerCase().trim();
-    const record = verificationStore.get(emailBusca);
-    
+    let record = verificationStore.get(emailBusca);
+
+    // Fallback: se o e-mail veio encaminhado via catch-all e o alias não veio no header, entrega o código recém-chegado (últimos 2 min)
+    if (!record) {
+      const ultimoGeral = verificationStore.get('ultimo_codigo_geral');
+      if (ultimoGeral && Date.now() - new Date(ultimoGeral.receivedAt).getTime() < 120000) {
+        record = ultimoGeral;
+      }
+    }
+
     if (!record) {
       return res.status(404).json({
         success: false,
